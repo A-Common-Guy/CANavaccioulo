@@ -1,9 +1,12 @@
 #include "stablecops/lely/MotorDriver.hpp"
 
+#include <cstdlib>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -42,10 +45,10 @@ void writeObjectName(std::ostream& stream,
 
 MotorDriver::MotorDriver(::lely::canopen::AsyncMaster& master,
                          uint8_t node_id,
-                         bool inspect_on_boot)
+                         BootActionConfig boot_actions)
     : ::lely::canopen::FiberDriver(master, node_id),
       drive_(*this),
-      inspect_on_boot_(inspect_on_boot) {}
+      boot_actions_(std::move(boot_actions)) {}
 
 ds402::DriveController& MotorDriver::drive() {
     return drive_;
@@ -99,9 +102,10 @@ void MotorDriver::OnBoot(::lely::canopen::NmtState state,
     std::cout << "node " << static_cast<int>(id())
               << " booted, NMT state " << static_cast<int>(state) << '\n';
 
-    if (inspect_on_boot_) {
+    if (boot_actions_.inspect) {
         inspectNode();
     }
+    runBootActions();
 }
 
 void MotorDriver::inspectNode() noexcept {
@@ -185,6 +189,87 @@ void MotorDriver::inspectNode() noexcept {
     read_i32(ds402::od::velocity_actual_value, ds402::od::default_subindex, "velocity");
     read_u16(ds402::od::torque_actual_value, ds402::od::default_subindex, "torque");
     read_u16(ds402::od::error_code, ds402::od::default_subindex, "error code");
+}
+
+void MotorDriver::runBootActions() noexcept {
+    const bool wants_motion_action =
+        boot_actions_.enable ||
+        boot_actions_.hold_position ||
+        boot_actions_.csp_target_position.has_value() ||
+        boot_actions_.csp_relative_move.has_value();
+
+    if (!wants_motion_action) {
+        return;
+    }
+
+    try {
+        enableDrive(boot_actions_.hold_position ||
+                    boot_actions_.csp_target_position.has_value() ||
+                    boot_actions_.csp_relative_move.has_value());
+        applyCspTarget();
+    } catch (const std::exception& exception) {
+        std::cerr << "boot action failed: " << exception.what() << '\n';
+    }
+}
+
+void MotorDriver::enableDrive(bool prime_csp_target) {
+    auto feedback = drive_.readFeedback();
+    std::cout << "enabling DS402 operation from state "
+              << ds402::toString(feedback.state)
+              << ", mode " << ds402::toString(feedback.mode) << '\n';
+
+    if (prime_csp_target || feedback.mode == ds402::OperationMode::CyclicSynchronousPosition) {
+        drive_.requestMode(ds402::OperationMode::CyclicSynchronousPosition);
+        const auto position = drive_.primeCspTargetToCurrentPosition();
+        std::cout << "  primed CSP target position to current position "
+                  << position << '\n';
+    }
+
+    feedback = drive_.enableOperationSafely(boot_actions_.state_transition_timeout);
+    std::cout << "  enabled operation, statusword=";
+    writeHex(std::cout, feedback.statusword, 4)
+        << " state=" << ds402::toString(feedback.state) << '\n';
+
+    if (prime_csp_target) {
+        const auto position = drive_.primeCspTargetToCurrentPosition();
+        std::cout << "  holding current position at " << position << '\n';
+    }
+}
+
+void MotorDriver::applyCspTarget() {
+    if (!boot_actions_.csp_target_position && !boot_actions_.csp_relative_move) {
+        return;
+    }
+
+    const auto feedback = drive_.readFeedback();
+    if (feedback.state != ds402::State::OperationEnabled) {
+        throw std::runtime_error("CSP target requires operation enabled");
+    }
+    if (feedback.mode != ds402::OperationMode::CyclicSynchronousPosition) {
+        throw std::runtime_error("CSP target requires cyclic synchronous position mode");
+    }
+
+    int64_t target = feedback.position;
+    if (boot_actions_.csp_target_position) {
+        target = *boot_actions_.csp_target_position;
+    }
+    if (boot_actions_.csp_relative_move) {
+        target += *boot_actions_.csp_relative_move;
+    }
+
+    if (target < std::numeric_limits<int32_t>::min() ||
+        target > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error("requested CSP target is outside int32 range");
+    }
+
+    const auto delta = target - feedback.position;
+    if (std::llabs(delta) > boot_actions_.max_position_step) {
+        throw std::runtime_error("requested CSP step exceeds --max-position-step");
+    }
+
+    drive_.setCspTargetPosition(static_cast<int32_t>(target));
+    std::cout << "  CSP target position set to " << target
+              << " (delta " << delta << " counts)\n";
 }
 
 }  // namespace stablecops::lely

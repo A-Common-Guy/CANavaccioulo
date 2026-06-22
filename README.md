@@ -57,6 +57,24 @@ Boot and inspect live CANopen/DS402 objects:
 build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --inspect --run
 ```
 
+Safely enable the DS402 power stage:
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --enable --run
+```
+
+Enable and hold the current CSP position:
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --hold-position --run
+```
+
+Command a guarded CSP step only after hold/enable has been verified:
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --csp-relative 1000 --max-position-step 1000 --run
+```
+
 ## Layout
 
 - `eds/EDS files/`: immutable vendor EDS files.

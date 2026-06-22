@@ -29,6 +29,37 @@ build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node
 6. Enable motion commands only after the live identity, DS402 state, supported
    modes, and PDO summary match expectations.
 
+## Enable And Hold
+
+The first useful action after inspection is a safe DS402 state transition. This
+primes the CSP target to the current position, sends `shutdown`, `switch on`,
+and `enable operation`, then checks that the drive reaches operation enabled.
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --enable --run
+```
+
+For CSP bring-up, prefer holding the current position first:
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --hold-position --run
+```
+
+Only after that works, request small explicit CSP target changes. The target is
+rejected if the requested step exceeds `--max-position-step`.
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --csp-relative 1000 --max-position-step 1000 --run
+```
+
+Available boot actions:
+
+- `--enable`: run the DS402 safe enable sequence.
+- `--hold-position`: enable and keep the CSP target at the current position.
+- `--csp-target counts`: enable and request an absolute CSP target.
+- `--csp-relative counts`: enable and request a relative CSP target.
+- `--max-position-step counts`: limit the allowed target delta.
+
 ## Profile Format
 
 Profiles are small YAML files. The default PHU profile is
@@ -78,6 +109,10 @@ code should not hardcode RPDO/TPDO map indexes or vendor-specific boot writes.
 `stablecops::ds402::DriveController` works in DS402 object terms: controlword,
 statusword, operation mode, target position, velocity, and torque. SDO remains
 the fallback for configuration and diagnostics.
+
+The enable path refuses to proceed on fault states, nonzero drive error codes,
+transition timeouts, non-CSP target commands, or target steps larger than the
+configured guard.
 
 Add explicit PDO remapping to a profile only when the vendor default layout is
 insufficient and the drive documentation confirms the remap sequence.

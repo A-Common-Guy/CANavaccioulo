@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 
 #include "stablecops/ds402/ObjectAccess.hpp"
@@ -38,6 +39,15 @@ public:
     void quickStop();
     void halt();
 
+    Feedback waitForState(State expected,
+                          std::chrono::milliseconds timeout,
+                          std::chrono::milliseconds poll_interval = std::chrono::milliseconds{20});
+    Feedback enableOperationSafely(
+        std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
+    int32_t primeCspTargetToCurrentPosition();
+    uint32_t readSupportedModes();
+    void requestMode(OperationMode mode);
+
     void switchModeSafely(OperationMode mode, int32_t stationary_velocity_threshold = 0);
     OperationMode readMode();
 
@@ -59,7 +69,6 @@ private:
 
     uint16_t readStatusword();
     void writeControlword(uint16_t value);
-    void setModeUnsafe(OperationMode mode);
 };
 
 }  // namespace stablecops::ds402

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace stablecops::app {
@@ -12,6 +13,11 @@ struct MotorConfig {
     uint8_t master_node_id{127};
     uint8_t node_id{1};
     bool inspect_on_boot{false};
+    bool enable_on_boot{false};
+    bool hold_position_on_boot{false};
+    std::optional<int32_t> csp_target_position;
+    std::optional<int32_t> csp_relative_move;
+    int32_t max_position_step{10000};
     std::chrono::milliseconds boot_timeout{5000};
     std::chrono::milliseconds state_transition_timeout{2000};
 };

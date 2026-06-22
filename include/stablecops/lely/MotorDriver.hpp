@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <optional>
 
 #include <lely/coapp/fiber_driver.hpp>
 
@@ -9,12 +11,22 @@
 
 namespace stablecops::lely {
 
+struct BootActionConfig {
+    bool inspect{false};
+    bool enable{false};
+    bool hold_position{false};
+    std::optional<int32_t> csp_target_position;
+    std::optional<int32_t> csp_relative_move;
+    int32_t max_position_step{10000};
+    std::chrono::milliseconds state_transition_timeout{2000};
+};
+
 class MotorDriver final : public ::lely::canopen::FiberDriver,
                           public ds402::ObjectAccess {
 public:
     MotorDriver(::lely::canopen::AsyncMaster& master,
                 uint8_t node_id,
-                bool inspect_on_boot);
+                BootActionConfig boot_actions);
 
     ds402::DriveController& drive();
     const ds402::DriveController& drive() const;
@@ -36,9 +48,12 @@ protected:
 
 private:
     void inspectNode() noexcept;
+    void runBootActions() noexcept;
+    void enableDrive(bool hold_position);
+    void applyCspTarget();
 
     ds402::DriveController drive_;
-    bool inspect_on_boot_{false};
+    BootActionConfig boot_actions_;
 };
 
 }  // namespace stablecops::lely
