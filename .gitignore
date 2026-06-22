@@ -5,3 +5,5 @@ compile_commands.json
 *.so
 *.d
 *.log
+docs_motor/
+dcf/

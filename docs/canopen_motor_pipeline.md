@@ -1,46 +1,67 @@
-# Generic CANopen Motor Pipeline
+# CANopen Motor Pipeline
 
-This project treats a motor integration as data first:
+The motor pipeline has one rule: vendor data goes in, generated artifacts come
+out. Runtime code stays generic unless a drive really needs vendor-specific
+behavior.
 
-1. Keep the vendor EDS unchanged under `eds/EDS files/`.
-2. Add or update a small profile under `config/motors/`.
-3. Generate the normalized EDS, dcfgen YAML, PDO summary, and `dcf/master.dcf`.
-4. Boot the drive with the generated DCF.
-5. Inspect live identity, state, supported modes, and feedback.
-6. Enable motion commands only after the profile and live drive agree.
+## Onboard A Motor
 
-## Generate Artifacts
-
-The default PHU profile is `config/motors/eyou_phu.yml`.
+1. Copy the vendor EDS into `eds/EDS files/` and leave it unchanged.
+2. Add a profile under `config/motors/`.
+3. Generate artifacts:
 
 ```bash
 python3 tools/generate_canopen_config.py --profile config/motors/eyou_phu.yml
 ```
 
-Generated files:
+4. Bring up SocketCAN:
+
+```bash
+sudo ./canup.sh
+```
+
+5. Boot and inspect:
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --inspect --run
+```
+
+6. Enable motion commands only after the live identity, DS402 state, supported
+   modes, and PDO summary match expectations.
+
+## Profile Format
+
+Profiles are small YAML files. The default PHU profile is
+`config/motors/eyou_phu.yml`.
+
+Required fields:
+
+- `name`: stable name used for generated artifact filenames.
+- `vendor_eds`: vendor EDS path relative to the repository root.
+- `master.node_id`: Lely master CANopen node ID.
+- `node.node_id`: drive CANopen node ID.
+- `identity_policy`: `strict` or `ignore`.
+- `pdo_policy`: start with `vendor-default`.
+- `mode_policy`: start with `vendor-default`.
+
+Generated artifacts are written to `generation.generated_dir`; the runtime DCF
+is written to `generation.dcf_dir`.
+
+## Generated Files
+
+For the PHU profile, generation writes:
 
 - `generated/canopen/eyou_phu/eyou_phu.normalized.eds`
 - `generated/canopen/eyou_phu/eyou_phu.dcfgen.yml`
 - `generated/canopen/eyou_phu/eyou_phu.summary.json`
 - `dcf/master.dcf`
 
-The normalized EDS is derived from the vendor EDS. Do not edit it by hand.
+The normalized EDS, generated YAML, summary, and DCF are derived artifacts. Do
+not hand-edit them; update the vendor EDS/profile and regenerate.
 
-## Inspect A Drive
+## Inspection
 
-Bring up SocketCAN first:
-
-```bash
-sudo ./canup.sh
-```
-
-Then boot and inspect the drive:
-
-```bash
-build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --inspect --run
-```
-
-Inspection reads generic CANopen/DS402 objects:
+`--inspect` performs read-only SDO diagnostics after boot. It reads:
 
 - `0x1018` identity
 - `0x6502` supported modes
@@ -54,11 +75,9 @@ Inspection reads generic CANopen/DS402 objects:
 The generated DCF and summary own profile-specific PDO knowledge. Runtime C++
 code should not hardcode RPDO/TPDO map indexes or vendor-specific boot writes.
 
-`stablecops::ds402::DriveController` works in object terms such as controlword,
-statusword, operation mode, target position, velocity, and torque. Lely uses the
-generated DCF for the CANopen network description, while SDO remains the generic
-fallback for inspection and diagnostics.
+`stablecops::ds402::DriveController` works in DS402 object terms: controlword,
+statusword, operation mode, target position, velocity, and torque. SDO remains
+the fallback for configuration and diagnostics.
 
-For a new motor, start with `pdo_policy: vendor-default`. Add explicit remapping
-to the profile only when the vendor default layout is insufficient and the drive
-documentation confirms the remap sequence.
+Add explicit PDO remapping to a profile only when the vendor default layout is
+insufficient and the drive documentation confirms the remap sequence.
