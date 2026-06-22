@@ -110,9 +110,100 @@ code should not hardcode RPDO/TPDO map indexes or vendor-specific boot writes.
 statusword, operation mode, target position, velocity, and torque. SDO remains
 the fallback for configuration and diagnostics.
 
+### Command image and cyclic streaming
+
+The drive groups several command objects into each RPDO (for the PHU default,
+RPDO1 = `0x6040` controlword + `0x60FF` target velocity + `0x6060` modes;
+RPDO2 = `0x607A` target position + `0x6081` profile velocity; RPDO3 =
+`0x6083`/`0x6084`). Because a PDO is transmitted as a whole frame, the master
+must never update one mapped object in isolation: doing so would send stale or
+zero values for that object's PDO neighbours.
+
+`MotorDriver` therefore keeps a single `CommandImage` and emits the *entire*
+image on every `OnSync`. Writes to command objects (`0x6040`, `0x6060`,
+`0x607A`, `0x60FF`, `0x6081`, `0x6083`, `0x6084`) update the image rather than
+issuing one-shot PDO events; the synchronous RPDOs carry a coherent frame on the
+next SYNC. Feedback objects (`0x6041`, `0x6061`, `0x6064`, `0x606C`, `0x6077`)
+are cached from the received TPDOs in `OnSync` and returned without bus traffic.
+SDO is used only for configuration, identity, error code, and the one-time image
+seed at enable. The drive rejects SDO downloads to the command objects *while it
+is operational*; those must go over PDO at runtime (see configuration below for
+why pre-operational SDO writes are still required and allowed).
+
+### Drive configuration (pre-operational)
+
+The PHU/RP drives ship with every PDO set to transmission type `0`
+(event-driven), so out of NVM they never stream TPDOs on SYNC and never run the
+cyclic RPDO exchange. They also reject SDO writes to command/PDO objects once the
+node is operational. The vendor bring-up recipe (manual Table 5-5) therefore
+configures the drive *before* it is started.
+
+`MotorDriver::OnConfig` runs during the NMT boot "update configuration" step,
+which executes while the node is still pre-operational. When a motion action is
+requested (so `--inspect` stays read-only) it pushes, over SDO:
+
+- `0x6060 = 8` (cyclic synchronous position).
+- For each active PDO (RPDO1-3, TPDO1-2): disable the PDO (set the COB-ID valid
+  bit), set the transmission type to `1` (cyclic synchronous), rewrite the
+  mapping from scratch, then re-enable it.
+
+The COB-IDs and mappings written are the vendor defaults and match
+`dcf/master.dcf` exactly, so both ends agree. Rewriting the whole mapping (not
+just the transmission type) also clears the stale/oversized mapping the drive
+otherwise reports straight from NVM. If configuration fails, the boot is aborted
+with the SDO abort code rather than starting a node that cannot communicate.
+
+### Enable sequence
+
+`enableDrive` seeds the command image from the live drive (mode, actual
+position, profile parameters), starts cyclic streaming, waits a few SYNC cycles,
+pulses a fault reset (controlword bit 7, per the vendor recipe), then walks
+`shutdown -> switch on -> enable operation`, confirming each transition from
+cached statusword feedback. While bringing CSP up, the commanded target tracks
+the measured position so the drive never sees a step at enable; once operation
+enabled is reached, the target is frozen (held).
+
 The enable path refuses to proceed on fault states, nonzero drive error codes,
-transition timeouts, non-CSP target commands, or target steps larger than the
-configured guard.
+transition timeouts, a missing SYNC stream, non-CSP target commands, or target
+steps larger than the configured guard.
 
 Add explicit PDO remapping to a profile only when the vendor default layout is
 insufficient and the drive documentation confirms the remap sequence.
+
+## Wire-Level Verification
+
+When a transition stalls, confirm what is actually on the bus before changing
+code. The command frames and feedback frames are the ground truth.
+
+Watch the command RPDOs the master sends (`0x201/0x301/0x401`), the feedback
+TPDOs the drive sends (`0x181/0x281`), and SYNC (`0x080`):
+
+```bash
+candump -tz can0,201:7FF can0,301:7FF can0,401:7FF can0,181:7FF can0,281:7FF can0,080:7FF
+```
+
+What healthy bring-up looks like:
+
+- `0x080` SYNC frames arrive at the configured cycle (1 ms for the PHU profile).
+- `0x201` carries a coherent image: the controlword bytes walk `06 00 -> 07 00
+  -> 0F 00` while the modes byte stays `08` (CSP) and target velocity stays `0`.
+  A controlword that changes while the modes byte drops to `00` is the
+  shared-PDO clobbering bug.
+- `0x181` statusword tracks the transitions (`31 06` ready to switch on ->
+  `33 06` switched on -> `37 06` operation enabled), error code stays `0`.
+
+The drive accepts SDO writes to command/PDO objects only while pre-operational.
+The same write that the master issues from `OnConfig` before NMT start aborts
+with `0x00000002` once the node is operational, which is why runtime command
+objects go over PDO:
+
+```bash
+# SDO download 0x6060 = 8; succeeds (581 ... 60) pre-op, aborts (581 ... 80) once
+# the node is operational
+cansend can0 601#2F60600008
+candump -tz can0,581:7FF
+```
+
+After a successful bring-up, re-running `--inspect` should now report every
+active PDO with `transmission type 0x01` and the expected mapped-object counts.
+

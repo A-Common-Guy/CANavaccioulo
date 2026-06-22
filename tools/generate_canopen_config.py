@@ -312,7 +312,7 @@ def main() -> int:
         return 0
 
     dcf_dir.mkdir(parents=True, exist_ok=True)
-    dcfgen_command = ["dcfgen"]
+    dcfgen_command = ["dcfgen", "-r"]
     if profile.get("generation", {}).get("no_strict", False):
         dcfgen_command.append("-S")
     dcfgen_command.extend(["-d", relpath(dcf_dir, root)])

@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <system_error>
 
 #include <lely/coapp/fiber_driver.hpp>
 
@@ -19,6 +21,20 @@ struct BootActionConfig {
     std::optional<int32_t> csp_relative_move;
     int32_t max_position_step{10000};
     std::chrono::milliseconds state_transition_timeout{2000};
+};
+
+// Coherent snapshot of every command object the master transmits to the drive.
+// The vendor groups several command objects into each RPDO, so the master must
+// always emit a full, consistent image; updating a single object in isolation
+// would zero its PDO neighbours on the wire.
+struct CommandImage {
+    uint16_t controlword{0x0006};       // 0x6040
+    int8_t mode{0};                     // 0x6060 modes of operation
+    int32_t target_position{0};         // 0x607A
+    int32_t target_velocity{0};         // 0x60FF
+    uint32_t profile_velocity{0};       // 0x6081
+    uint32_t profile_acceleration{0};   // 0x6083
+    uint32_t profile_deceleration{0};   // 0x6084
 };
 
 class MotorDriver final : public ::lely::canopen::FiberDriver,
@@ -45,15 +61,36 @@ protected:
     void OnBoot(::lely::canopen::NmtState state,
                 char error,
                 const std::string& reason) noexcept override;
+    void OnConfig(std::function<void(std::error_code)> result) noexcept override;
+    void OnRpdoWrite(uint16_t index, uint8_t subindex) noexcept override;
+    void OnSync(uint8_t counter, const time_point& time) noexcept override;
 
 private:
+    bool wantsMotionAction() const;
+    std::error_code configureDriveForCsp() noexcept;
     void inspectNode() noexcept;
     void runBootActions() noexcept;
+    ds402::Feedback waitForDriveState(ds402::State expected,
+                                      std::chrono::milliseconds timeout,
+                                      std::chrono::milliseconds poll_interval =
+                                          std::chrono::milliseconds{20});
+    void primeCommandImage();
     void enableDrive(bool hold_position);
     void applyCspTarget();
+    void setControlword(uint16_t controlword);
+
+    bool isCommandObject(uint16_t index) const;
+    bool isFeedbackObject(uint16_t index) const;
 
     ds402::DriveController drive_;
     BootActionConfig boot_actions_;
+
+    CommandImage command_;
+    ds402::Feedback feedback_;
+    bool cyclic_active_{false};
+    bool csp_track_actual_{false};
+    bool rpdo_seen_{false};
+    uint64_t sync_count_{0};
 };
 
 }  // namespace stablecops::lely

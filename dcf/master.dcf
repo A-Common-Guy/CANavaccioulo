@@ -95,12 +95,22 @@ SupportedObjects=33
 33=0x1F8A
 
 [ManufacturerObjects]
-SupportedObjects=5
+SupportedObjects=15
 1=0x2000
 2=0x2001
 3=0x2200
 4=0x2201
 5=0x2202
+6=0x5800
+7=0x5801
+8=0x5A00
+9=0x5A01
+10=0x5C00
+11=0x5C01
+12=0x5C02
+13=0x5E00
+14=0x5E01
+15=0x5E02
 
 [1000]
 ParameterName=Device type
@@ -727,3 +737,95 @@ ParameterName=phu_joint: Profile deceleration
 DataType=0x0007
 AccessType=rwr
 PDOMapping=1
+
+[5800]
+ParameterName=Remote TPDO number and node-ID
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00000101
+
+[5801]
+ParameterName=Remote TPDO number and node-ID
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00000201
+
+[5A00]
+ParameterName=Remote TPDO mapping parameter
+ObjectType=0x08
+DataType=0x0007
+AccessType=rw
+CompactSubObj=3
+
+[5A00Value]
+NrOfEntries=3
+1=0x60410010
+2=0x60610008
+3=0x60770010
+
+[5A01]
+ParameterName=Remote TPDO mapping parameter
+ObjectType=0x08
+DataType=0x0007
+AccessType=rw
+CompactSubObj=2
+
+[5A01Value]
+NrOfEntries=2
+1=0x60640020
+2=0x606C0020
+
+[5C00]
+ParameterName=Remote RPDO number and node-ID
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00000101
+
+[5C01]
+ParameterName=Remote RPDO number and node-ID
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00000201
+
+[5C02]
+ParameterName=Remote RPDO number and node-ID
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00000301
+
+[5E00]
+ParameterName=Remote RPDO mapping parameter
+ObjectType=0x08
+DataType=0x0007
+AccessType=rw
+CompactSubObj=3
+
+[5E00Value]
+NrOfEntries=3
+1=0x60400010
+2=0x60FF0020
+3=0x60600008
+
+[5E01]
+ParameterName=Remote RPDO mapping parameter
+ObjectType=0x08
+DataType=0x0007
+AccessType=rw
+CompactSubObj=2
+
+[5E01Value]
+NrOfEntries=2
+1=0x607A0020
+2=0x60810020
+
+[5E02]
+ParameterName=Remote RPDO mapping parameter
+ObjectType=0x08
+DataType=0x0007
+AccessType=rw
+CompactSubObj=2
+
+[5E02Value]
+NrOfEntries=2
+1=0x60830020
+2=0x60840020
