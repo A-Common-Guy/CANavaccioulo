@@ -7,3 +7,8 @@ compile_commands.json
 *.log
 docs_motor/
 dcf/
+.cache/
+.vscode/
+logs/
+.cache*
+*.idx
