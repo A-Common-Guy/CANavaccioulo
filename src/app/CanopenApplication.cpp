@@ -26,6 +26,7 @@ stablecops::lely::BootActionConfig makeBootActions(const MotorConfig& config) {
     actions.inspect = config.inspect_on_boot;
     actions.enable = config.enable_on_boot;
     actions.hold_position = config.hold_position_on_boot;
+    actions.monitor = config.monitor_on_boot;
     actions.csp_target_position = config.csp_target_position;
     actions.csp_relative_move = config.csp_relative_move;
     actions.max_position_step = config.max_position_step;
@@ -121,6 +122,18 @@ stablecops::lely::MotorDriver& CanopenApplication::motor() {
 
 void CanopenApplication::resetMaster() {
     impl_->master_.Reset();
+}
+
+void CanopenApplication::post(std::function<void()> task) {
+    impl_->executor_.post(std::move(task));
+}
+
+ds402::Feedback CanopenApplication::feedback() const {
+    return impl_->motor_.feedbackSnapshot();
+}
+
+bool CanopenApplication::feedbackLive() const {
+    return impl_->motor_.feedbackLive();
 }
 
 void CanopenApplication::run() {

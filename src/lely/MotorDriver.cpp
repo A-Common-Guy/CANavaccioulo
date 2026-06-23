@@ -234,6 +234,23 @@ void MotorDriver::decodeFeedbackObject(uint16_t index, int64_t raw) {
     }
 }
 
+void MotorDriver::publishFeedback() {
+    {
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
+        feedback_published_ = feedback_;
+    }
+    feedback_live_.store(true, std::memory_order_release);
+}
+
+ds402::Feedback MotorDriver::feedbackSnapshot() const {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
+    return feedback_published_;
+}
+
+bool MotorDriver::feedbackLive() const {
+    return feedback_live_.load(std::memory_order_acquire);
+}
+
 ds402::DriveController& MotorDriver::drive() {
     return drive_;
 }
@@ -381,7 +398,7 @@ void MotorDriver::OnConfig(
     // node is operational aborts with 0x00000002). We only reconfigure when a
     // motion action is requested so that --inspect stays read-only.
     std::error_code ec;
-    if (wantsMotionAction()) {
+    if (wantsCyclicConfig()) {
         ec = configurePdos();
         if (ec) {
             std::cerr << "node " << static_cast<int>(id())
@@ -516,6 +533,7 @@ void MotorDriver::OnSync(uint8_t /*counter*/, const time_point& /*time*/) noexce
                 decodeFeedbackObject(object.index, raw);
             }
         }
+        publishFeedback();
     }
 
     if (!cyclic_active_) {
@@ -688,6 +706,12 @@ bool MotorDriver::wantsMotionAction() const {
            boot_actions_.hold_position ||
            boot_actions_.csp_target_position.has_value() ||
            boot_actions_.csp_relative_move.has_value();
+}
+
+bool MotorDriver::wantsCyclicConfig() const {
+    // PDO reconfiguration (transmission type 1) is needed both to command the
+    // drive and to merely observe its feedback cyclically.
+    return wantsMotionAction() || boot_actions_.monitor;
 }
 
 void MotorDriver::runBootActions() noexcept {

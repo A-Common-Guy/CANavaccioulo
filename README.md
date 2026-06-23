@@ -57,6 +57,12 @@ Boot and inspect live CANopen/DS402 objects:
 build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --inspect --run
 ```
 
+Receive cyclic PDO feedback without energising the drive (monitor mode):
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --monitor --run
+```
+
 Safely enable the DS402 power stage:
 
 ```bash
@@ -73,6 +79,37 @@ Command a guarded CSP step only after hold/enable has been verified:
 
 ```bash
 build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --csp-relative 1000 --max-position-step 1000 --run
+```
+
+## Library API (MotorDrive)
+
+`stablecops::app::MotorDrive` is a thread-safe handle that runs the Lely event
+loop on its own thread, so an application can read feedback and issue setpoints
+from its own thread without touching Lely internals:
+
+```cpp
+stablecops::app::MotorConfig config;
+config.monitor_on_boot = true;          // or enable_on_boot / hold_position_on_boot
+stablecops::app::MotorDrive drive(config);
+drive.start();
+while (drive.feedbackLive()) {
+    auto fb = drive.feedback();          // thread-safe snapshot
+    // ... use fb.position / fb.velocity / fb.torque / fb.state ...
+}
+drive.commandPosition(counts);          // posted to the loop thread (when enabled in CSP)
+drive.stop();                            // graceful de-energise + join
+```
+
+## Examples
+
+Built under `build/examples/`:
+
+```bash
+# Stream decoded feedback from the drive over PDO, power stage stays off:
+build/examples/pdo_feedback_monitor --can can0 --dcf dcf/master.dcf --node 1 --seconds 10
+
+# Enable + hold the current CSP position while printing live feedback:
+build/examples/enable_and_hold --can can0 --dcf dcf/master.dcf --node 1 --seconds 10
 ```
 
 ## Layout

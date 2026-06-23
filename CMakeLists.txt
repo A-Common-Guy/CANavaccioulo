@@ -10,6 +10,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LELY_COAPP REQUIRED IMPORTED_TARGET liblely-coapp)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 add_library(stablecops_lely_project_options INTERFACE)
 target_compile_features(stablecops_lely_project_options INTERFACE cxx_std_17)
 target_compile_options(stablecops_lely_project_options INTERFACE
@@ -41,14 +44,31 @@ target_link_libraries(stablecops_config PUBLIC stablecops_lely_project_options)
 
 add_library(stablecops_runtime
     src/app/CanopenApplication.cpp
+    src/app/MotorDrive.cpp
     src/lely/MotorDriver.cpp
 )
 target_include_directories(stablecops_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(stablecops_runtime PUBLIC stablecops_ds402 stablecops_config)
+target_link_libraries(stablecops_runtime PUBLIC stablecops_ds402 stablecops_config Threads::Threads)
 
 add_executable(stablecops_master
     src/tools/stablecops_master.cpp
 )
 target_link_libraries(stablecops_master PRIVATE stablecops_runtime)
+
+add_executable(pdo_feedback_monitor
+    examples/pdo_feedback_monitor.cpp
+)
+set_target_properties(pdo_feedback_monitor PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
+target_link_libraries(pdo_feedback_monitor PRIVATE stablecops_runtime)
+
+add_executable(enable_and_hold
+    examples/enable_and_hold.cpp
+)
+set_target_properties(enable_and_hold PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
+target_link_libraries(enable_and_hold PRIVATE stablecops_runtime)

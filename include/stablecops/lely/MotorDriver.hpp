@@ -1,8 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <system_error>
 #include <vector>
@@ -19,6 +21,7 @@ struct BootActionConfig {
     bool inspect{false};
     bool enable{false};
     bool hold_position{false};
+    bool monitor{false};
     std::optional<int32_t> csp_target_position;
     std::optional<int32_t> csp_relative_move;
     int32_t max_position_step{10000};
@@ -59,6 +62,12 @@ public:
     void requestGracefulStop();
     void setStoppedCallback(std::function<void()> on_stopped);
 
+    // Thread-safe snapshot of the latest feedback, published every cycle from the
+    // loop thread. Safe to call from any thread (e.g. an application reading
+    // telemetry while the Lely event loop runs on its own thread).
+    ds402::Feedback feedbackSnapshot() const;
+    bool feedbackLive() const;
+
     uint8_t readU8(uint16_t index, uint8_t subindex) override;
     uint16_t readU16(uint16_t index, uint8_t subindex) override;
     uint32_t readU32(uint16_t index, uint8_t subindex) override;
@@ -79,6 +88,7 @@ protected:
 
 private:
     bool wantsMotionAction() const;
+    bool wantsCyclicConfig() const;
     std::error_code configurePdos() noexcept;
     void inspectNode() noexcept;
     void runBootActions() noexcept;
@@ -107,6 +117,7 @@ private:
     int64_t readMappedObject(const CyclicObject& object, std::error_code& ec);
     void writeMappedObject(const CyclicObject& object, std::error_code& ec);
     void decodeFeedbackObject(uint16_t index, int64_t raw);
+    void publishFeedback();
 
     ds402::DriveController drive_;
     BootActionConfig boot_actions_;
@@ -119,6 +130,12 @@ private:
     std::vector<CyclicObject> command_objects_;
     std::vector<CyclicObject> feedback_objects_;
     ds402::Feedback feedback_;
+
+    // Published snapshot for other threads; written under the lock at the end of
+    // each OnSync, read by feedbackSnapshot().
+    mutable std::mutex feedback_mutex_;
+    ds402::Feedback feedback_published_;
+    std::atomic<bool> feedback_live_{false};
     bool cyclic_active_{false};
     bool csp_track_actual_{false};
     bool rpdo_seen_{false};

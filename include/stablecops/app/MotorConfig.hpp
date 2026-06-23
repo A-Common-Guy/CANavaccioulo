@@ -19,6 +19,9 @@ struct MotorConfig {
     bool inspect_on_boot{false};
     bool enable_on_boot{false};
     bool hold_position_on_boot{false};
+    // Configure the drive's PDOs for cyclic transfer and stream SYNC without
+    // enabling the power stage, so feedback can be observed with the joint safe.
+    bool monitor_on_boot{false};
     std::optional<int32_t> csp_target_position;
     std::optional<int32_t> csp_relative_move;
     int32_t max_position_step{10000};

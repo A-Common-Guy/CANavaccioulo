@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
     const auto print_usage = [] {
         std::cerr << "usage: stablecops_master [--can can0] [--dcf dcf/master.dcf] "
                      "[--summary generated/.../<name>.summary.json] "
-                     "[--master-node 127] [--node 1] [--inspect] [--enable] "
+                     "[--master-node 127] [--node 1] [--inspect] [--monitor] [--enable] "
                      "[--hold-position] [--csp-target counts] [--csp-relative counts] "
                      "[--max-position-step counts] [--run]\n";
     };
@@ -24,6 +24,8 @@ int main(int argc, char** argv) {
             run = true;
         } else if (arg == "--inspect") {
             config.inspect_on_boot = true;
+        } else if (arg == "--monitor") {
+            config.monitor_on_boot = true;
         } else if (arg == "--enable") {
             config.enable_on_boot = true;
         } else if (arg == "--hold-position") {
@@ -63,6 +65,7 @@ int main(int argc, char** argv) {
         << "Master Node ID: " << static_cast<int>(config.master_node_id) << '\n'
         << "Node ID: " << static_cast<int>(config.node_id) << '\n'
         << "Inspect on boot: " << (config.inspect_on_boot ? "yes" : "no") << '\n'
+        << "Monitor on boot: " << (config.monitor_on_boot ? "yes" : "no") << '\n'
         << "Enable on boot: " << (config.enable_on_boot ? "yes" : "no") << '\n'
         << "Hold position: " << (config.hold_position_on_boot ? "yes" : "no") << '\n'
         << "Max position step: " << config.max_position_step << " counts\n"

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include "stablecops/app/MotorConfig.hpp"
+#include "stablecops/ds402/DriveController.hpp"
 #include "stablecops/lely/MotorDriver.hpp"
 
 namespace stablecops::app {
@@ -20,6 +22,14 @@ public:
     void resetMaster();
     void run();
     void stop();
+
+    // Schedule a function to run on the event-loop thread. Thread-safe; this is
+    // the only correct way to touch Lely/driver state from another thread.
+    void post(std::function<void()> task);
+
+    // Thread-safe telemetry, readable from any thread while run() executes.
+    ds402::Feedback feedback() const;
+    bool feedbackLive() const;
 
 private:
     class Impl;
