@@ -22,6 +22,8 @@ struct BootActionConfig {
     bool enable{false};
     bool hold_position{false};
     bool monitor{false};
+    // When set, selected over SDO (0x6060) while pre-operational at boot.
+    std::optional<ds402::OperationMode> mode;
     std::optional<int32_t> csp_target_position;
     std::optional<int32_t> csp_relative_move;
     int32_t max_position_step{10000};
@@ -90,6 +92,7 @@ private:
     bool wantsMotionAction() const;
     bool wantsCyclicConfig() const;
     std::error_code configurePdos() noexcept;
+    std::error_code selectOperationMode() noexcept;
     void inspectNode() noexcept;
     void runBootActions() noexcept;
     ds402::Feedback waitForDriveState(ds402::State expected,

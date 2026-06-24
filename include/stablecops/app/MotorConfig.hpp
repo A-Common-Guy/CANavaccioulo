@@ -5,6 +5,8 @@
 #include <optional>
 #include <string>
 
+#include "stablecops/ds402/State.hpp"
+
 namespace stablecops::app {
 
 struct MotorConfig {
@@ -22,6 +24,11 @@ struct MotorConfig {
     // Configure the drive's PDOs for cyclic transfer and stream SYNC without
     // enabling the power stage, so feedback can be observed with the joint safe.
     bool monitor_on_boot{false};
+    // Operation mode (0x6060) to select over SDO while the node is
+    // pre-operational at boot. Unset leaves the drive's persisted mode in place
+    // (preserves the historical CSP-only behaviour). One fixed PDO layout serves
+    // CSP/CSV/CST, so only this object changes between cyclic modes.
+    std::optional<ds402::OperationMode> operation_mode;
     std::optional<int32_t> csp_target_position;
     std::optional<int32_t> csp_relative_move;
     int32_t max_position_step{10000};

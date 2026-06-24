@@ -1,10 +1,25 @@
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <string>
 
 #include "stablecops/app/CanopenApplication.hpp"
 #include "stablecops/app/MotorConfig.hpp"
+#include "stablecops/ds402/State.hpp"
+
+namespace {
+
+std::optional<stablecops::ds402::OperationMode> parseOperationMode(
+    const std::string& name) {
+    using stablecops::ds402::OperationMode;
+    if (name == "csp") return OperationMode::CyclicSynchronousPosition;
+    if (name == "csv") return OperationMode::CyclicSynchronousVelocity;
+    if (name == "cst") return OperationMode::CyclicSynchronousTorque;
+    return std::nullopt;
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
     stablecops::app::MotorConfig config;
@@ -13,6 +28,7 @@ int main(int argc, char** argv) {
         std::cerr << "usage: stablecops_master [--can can0] [--dcf dcf/master.dcf] "
                      "[--summary generated/.../<name>.summary.json] "
                      "[--master-node 127] [--node 1] [--inspect] [--monitor] [--enable] "
+                     "[--mode csp|csv|cst] "
                      "[--hold-position] [--csp-target counts] [--csp-relative counts] "
                      "[--max-position-step counts] [--run]\n";
     };
@@ -31,6 +47,16 @@ int main(int argc, char** argv) {
         } else if (arg == "--hold-position") {
             config.enable_on_boot = true;
             config.hold_position_on_boot = true;
+        } else if (arg == "--mode" && i + 1 < argc) {
+            const std::string mode_name = argv[++i];
+            const auto mode = parseOperationMode(mode_name);
+            if (!mode) {
+                std::cerr << "unknown --mode '" << mode_name
+                          << "' (expected csp, csv, or cst)\n";
+                print_usage();
+                return EXIT_FAILURE;
+            }
+            config.operation_mode = mode;
         } else if (arg == "--can" && i + 1 < argc) {
             config.can_interface = argv[++i];
         } else if (arg == "--dcf" && i + 1 < argc) {
@@ -67,6 +93,11 @@ int main(int argc, char** argv) {
         << "Inspect on boot: " << (config.inspect_on_boot ? "yes" : "no") << '\n'
         << "Monitor on boot: " << (config.monitor_on_boot ? "yes" : "no") << '\n'
         << "Enable on boot: " << (config.enable_on_boot ? "yes" : "no") << '\n'
+        << "Operation mode: "
+        << (config.operation_mode
+                ? stablecops::ds402::toString(*config.operation_mode)
+                : std::string("persisted (unchanged)"))
+        << '\n'
         << "Hold position: " << (config.hold_position_on_boot ? "yes" : "no") << '\n'
         << "Max position step: " << config.max_position_step << " counts\n"
         << "Master DCF: " << config.master_dcf_path << '\n'

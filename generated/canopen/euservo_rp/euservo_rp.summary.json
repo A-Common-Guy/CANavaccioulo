@@ -6,8 +6,8 @@
   "node_id": 1,
   "master_node_id": 127,
   "identity_policy": "ignore",
-  "pdo_policy": "csp-minimal",
-  "mode_policy": "vendor-default",
+  "pdo_policy": "cyclic-superset",
+  "mode_policy": "sdo-at-boot",
   "pdo_mappings": {
     "rpdo": [
       {
@@ -35,9 +35,22 @@
         "pdo": 2,
         "communication_index": "0x1401",
         "mapping_index": "0x1601",
-        "cob_id": 2147484417,
+        "cob_id": 769,
         "transmission_type": 1,
-        "entries": []
+        "entries": [
+          {
+            "index": "0x60FF",
+            "subindex": 0,
+            "bit_length": 32,
+            "name": "Target velocity"
+          },
+          {
+            "index": "0x6071",
+            "subindex": 0,
+            "bit_length": 16,
+            "name": "Target torque value"
+          }
+        ]
       },
       {
         "pdo": 3,

@@ -400,12 +400,41 @@ void MotorDriver::OnConfig(
     std::error_code ec;
     if (wantsCyclicConfig()) {
         ec = configurePdos();
+        if (!ec) {
+            ec = selectOperationMode();
+        }
         if (ec) {
             std::cerr << "node " << static_cast<int>(id())
                       << " configuration failed: " << ec.message() << '\n';
         }
     }
     result(ec);
+}
+
+std::error_code MotorDriver::selectOperationMode() noexcept {
+    // Select the operation mode by writing 0x6060 over SDO while the node is
+    // still pre-operational (manual: 0x6060 is SDO-writable in this state; the
+    // PDO-only abort 0x00000002 applies to the target/controlword objects, not
+    // to mode selection). One fixed PDO layout serves CSP/CSV/CST, so this is
+    // the only object that changes between cyclic modes. Left untouched when no
+    // mode is requested, preserving the drive's persisted mode.
+    if (!boot_actions_.mode) {
+        return {};
+    }
+
+    const auto mode = *boot_actions_.mode;
+    std::error_code ec;
+    Wait(AsyncWrite(ds402::od::modes_of_operation, ds402::od::default_subindex,
+                    static_cast<int8_t>(mode)),
+         ec);
+    if (ec) {
+        std::cerr << "  SDO write to modes of operation (0x6060:00) failed: "
+                  << ec.message() << '\n';
+        return ec;
+    }
+    std::cout << "  operation mode set to " << ds402::toString(mode) << " (0x6060="
+              << static_cast<int>(static_cast<int8_t>(mode)) << ")\n";
+    return {};
 }
 
 std::error_code MotorDriver::configurePdos() noexcept {

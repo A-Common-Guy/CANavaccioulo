@@ -27,6 +27,7 @@ stablecops::lely::BootActionConfig makeBootActions(const MotorConfig& config) {
     actions.enable = config.enable_on_boot;
     actions.hold_position = config.hold_position_on_boot;
     actions.monitor = config.monitor_on_boot;
+    actions.mode = config.operation_mode;
     actions.csp_target_position = config.csp_target_position;
     actions.csp_relative_move = config.csp_relative_move;
     actions.max_position_step = config.max_position_step;

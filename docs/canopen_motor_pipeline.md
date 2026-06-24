@@ -121,15 +121,19 @@ the EDS-default RxPDO1 (`0x6040` controlword + `0x60FF` target velocity +
 `0x6060` modes) during CSP bring-up: even with a correct controlword on the
 wire, the drive stays in *ready to switch on* and ignores every controlword
 (including `0x80` disable-voltage), which means it is discarding the whole
-frame. The vendor's proven CSP recipe (manual Table 5-5 / 3.6.1) keeps the mode
-object out of the cyclic stream and uses:
+frame. Keeping the mode object out of the cyclic stream fixes this. We use a
+single fixed **cyclic superset** layout so one PDO map serves CSP/CSV/CST
+without re-mapping per mode (the active mode is selected over SDO at boot):
 
-- **RPDO1** = `0x6040` controlword + `0x607A` target position
-- RPDO2 / RPDO3: disabled (CSP only needs the target position, now in RPDO1)
+- **RPDO1** (`0x301`) = `0x6040` controlword + `0x607A` target position
+- **RPDO2** (`0x381`) = `0x60FF` target velocity + `0x6071` target torque
+- RPDO3: disabled (unused)
 - **TPDO1** = `0x6041` statusword + `0x6061` mode display + `0x6077` torque
 - **TPDO2** = `0x6064` position + `0x606C` velocity
 
-This is the layout the generator emits (`eds_overrides` in the profile), records
+The drive obeys only the target that matches its active mode (`0x6060`) and
+ignores the others, so all cyclic targets can ride the bus every cycle. This is
+the layout the generator emits (`eds_overrides` in the profile), records
 in `*.summary.json`, and that `OnConfig` reads back from the summary (via
 `config::PdoMap`) to program on the drive. Because a PDO is transmitted as a whole
 frame, the master must never update one mapped object in isolation: doing so
@@ -166,8 +170,9 @@ which executes while the node is still pre-operational. When a motion action is
 requested (so `--inspect` stays read-only) it pushes, over SDO, for each active
 PDO (RPDO1, TPDO1, TPDO2): disable the PDO (set the COB-ID valid bit), set the
 transmission type to `1` (cyclic synchronous), rewrite the mapping from scratch,
-then re-enable it. RPDO2 and RPDO3 are explicitly disabled (COB-ID valid bit)
-because the master no longer transmits them in the CSP layout.
+then re-enable it. With the cyclic superset layout RPDO1 and RPDO2 are both
+programmed; RPDO3 is explicitly disabled (COB-ID valid bit) because the master
+never transmits it.
 
 The COB-IDs and mappings written match `dcf/master.dcf` exactly (both are driven
 from the profile's `eds_overrides`), so both ends agree. Rewriting the whole
@@ -176,12 +181,17 @@ the drive otherwise reports straight from NVM. If configuration fails, the boot
 is aborted with the SDO abort code rather than starting a node that cannot
 communicate.
 
-The mode (`0x6060`) is deliberately **not** written here, and it is kept out of
-the cyclic RxPDO. On this firmware the DS402 command objects (`0x6040`,
-`0x6060`, `0x607A`, ...) are PDO-only: SDO downloads abort with the vendor code
-`0x00000002`. The drive's persisted mode is already `8` (CSP), so it does not
-need to be (re)written; streaming `0x6060` cyclically while the drive is not
-enabled is exactly what makes the firmware reject RxPDO1.
+The mode object `0x6060` is kept **out of the cyclic RxPDO** (streaming it is
+exactly what makes the firmware reject RxPDO1), but it *is* selected over SDO
+here when a mode is requested (`--mode csp|csv|cst`, or `MotorConfig::
+operation_mode`). The RP manual writes `0x6060` over SDO while the node is
+pre-operational, which is the window `OnConfig` runs in. This is distinct from
+the *target/controlword* command objects (`0x6040`, `0x607A`, `0x60FF`,
+`0x6071`), which remain PDO-only on this firmware and abort SDO downloads with
+`0x00000002`. When no mode is requested the write is skipped and the drive's
+persisted mode (factory default `8`, CSP) is left in place, preserving the
+original CSP-only behaviour. If the `0x6060` write ever aborts, the boot fails
+with that abort code rather than silently running the wrong mode.
 
 ### Enable sequence
 

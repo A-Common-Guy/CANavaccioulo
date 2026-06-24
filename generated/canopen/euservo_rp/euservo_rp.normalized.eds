@@ -842,7 +842,7 @@ AccessType=RW
 DataType=0x0007
 PDOMapping=0
 ObjFlags=0x00000000
-DefaultValue=$NODEID+0x80000300
+DefaultValue=$NODEID+0x300
 
 [1401sub2]
 ParameterName=Transmission Type
@@ -1023,7 +1023,7 @@ PDOMapping=0
 ObjFlags=0x00000000
 LowLimit=0
 HighLimit=8
-DefaultValue=0
+DefaultValue=2
 
 [1601sub1]
 ParameterName=PDO 2 Mapping for an application object 1
@@ -1032,7 +1032,7 @@ AccessType=RW
 DataType=0x0007
 PDOMapping=0
 ObjFlags=0x00000000
-DefaultValue=0x607a0020
+DefaultValue=0x60FF0020
 
 [1601sub2]
 ParameterName=PDO 2 Mapping for an application object 2
@@ -1041,7 +1041,7 @@ AccessType=RW
 DataType=0x0007
 PDOMapping=0
 ObjFlags=0x00000000
-DefaultValue=0x60810020
+DefaultValue=0x60710010
 
 [1601sub3]
 ParameterName=PDO 2 Mapping for an application object 3

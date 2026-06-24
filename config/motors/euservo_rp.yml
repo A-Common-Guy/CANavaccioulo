@@ -1,5 +1,5 @@
 name: euservo_rp
-description: Yiyou EuServo RP servo module (RP EDS V1.4), CSP-minimal PDO layout
+description: Yiyou EuServo RP servo module (RP EDS V1.4), cyclic superset PDO layout (CSP/CSV/CST)
 
 vendor_eds: eds/EDS files/EuServo_RP_EDS_（RP）V1.4.eds
 
@@ -29,23 +29,28 @@ generation:
   no_strict: true
 
 identity_policy: ignore
-pdo_policy: csp-minimal
-mode_policy: vendor-default
+pdo_policy: cyclic-superset
+mode_policy: sdo-at-boot
 
-# The RP EDS ships the same vendor-default RxPDO1 (controlword + target velocity
-# + modes) as the EYou PHU module. The proven CSP recipe (manual Table 5-5 /
-# 3.6.1) uses RxPDO1 = controlword + target position and keeps the mode object
-# out of the cyclic stream, so we apply the same overrides here. RPDO2/RPDO3 are
-# disabled because CSP only needs the target position, which now rides in RPDO1.
+# Fixed "cyclic superset" PDO layout: one map serves CSP, CSV and CST without
+# re-mapping per mode. The active mode is selected over SDO (0x6060) while the
+# node is pre-operational at boot; the drive obeys the target matching that mode
+# and ignores the others, so all cyclic targets can ride the bus every cycle.
+#
+# RxPDO1 (0x301): controlword (0x6040:00,16) + target position (0x607A:00,32)
+# RxPDO2 (0x381): target velocity (0x60FF:00,32) + target torque (0x6071:00,16)
+# RxPDO3: disabled (unused).
 # TPDO feedback is left at the vendor default so statusword/mode/position/
-# velocity/torque stay available. This matches kPdoSetup in MotorDriver.cpp.
+# velocity/torque stay available for every mode.
 eds_overrides:
   # RxPDO1 mapping -> controlword (0x6040:00,16) + target position (0x607A:00,32)
   "1600sub0": { DefaultValue: "2" }
   "1600sub2": { DefaultValue: "0x607A0020" }
-  # Disable RxPDO2 (COB-ID valid bit set + empty mapping)
-  "1401sub1": { DefaultValue: "$NODEID+0x80000300" }
-  "1601sub0": { DefaultValue: "0" }
+  # RxPDO2 mapping -> target velocity (0x60FF:00,32) + target torque (0x6071:00,16)
+  "1401sub1": { DefaultValue: "$NODEID+0x300" }
+  "1601sub0": { DefaultValue: "2" }
+  "1601sub1": { DefaultValue: "0x60FF0020" }
+  "1601sub2": { DefaultValue: "0x60710010" }
   # Disable RxPDO3
   "1402sub1": { DefaultValue: "$NODEID+0x80000400" }
   "1602sub0": { DefaultValue: "0" }

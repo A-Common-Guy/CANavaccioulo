@@ -75,6 +75,13 @@ Enable and hold the current CSP position:
 build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --hold-position --run
 ```
 
+Select the cyclic mode at boot (CSP/CSV/CST share one fixed PDO layout; the mode
+is chosen over SDO while pre-operational):
+
+```bash
+build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --mode csv --enable --run
+```
+
 Command a guarded CSP step only after hold/enable has been verified:
 
 ```bash
@@ -97,6 +104,9 @@ while (drive.feedbackLive()) {
     // ... use fb.position / fb.velocity / fb.torque / fb.state ...
 }
 drive.commandPosition(counts);          // posted to the loop thread (when enabled in CSP)
+// In a cyclic mode chosen via config.operation_mode:
+drive.commandVelocity(units);           // CSV
+drive.commandTorque(units);             // CST
 drive.stop();                            // graceful de-energise + join
 ```
 
@@ -111,6 +121,58 @@ build/examples/pdo_feedback_monitor --can can0 --dcf dcf/master.dcf --node 1 --s
 # Enable + hold the current CSP position while printing live feedback:
 build/examples/enable_and_hold --can can0 --dcf dcf/master.dcf --node 1 --seconds 10
 ```
+
+One simple example per cyclic mode (defaults command 0 = no motion; SPINS the
+motor if a nonzero setpoint is passed):
+
+```bash
+# CSP: hold (start + offset) counts
+build/examples/csp_position --can can0 --node 1 --offset 0 --seconds 5
+
+# CSV: stream a constant target velocity
+build/examples/csv_velocity --can can0 --node 1 --velocity 0 --seconds 5
+
+# CST: stream a constant target torque
+build/examples/cst_torque  --can can0 --node 1 --torque 0 --seconds 5
+```
+
+## Linting & formatting
+
+In-editor diagnostics, completion, and go-to come from **clangd**, which reads
+`build/compile_commands.json` plus the repo configs (`.clangd`, `.clang-tidy`,
+`.clang-format`). Static analysis is **clang-tidy**; formatting is
+**clang-format**.
+
+One-time setup:
+
+```bash
+# 1. Tools (user-space; no sudo needed). Or apt install clangd clang-tidy clang-format.
+pip install --user clangd clang-tidy clang-format
+
+# 2. Generate the compile database clangd needs.
+cmake --preset default        # creates build/compile_commands.json (symlinked at repo root)
+
+# 3. In Cursor/VS Code: install the "clangd" extension (llvm-vs-code-extensions.vscode-clangd)
+#    and disable the Microsoft C/C++ IntelliSense engine so they don't fight.
+```
+
+Command-line usage (wraps the gcc-toolchain pin for you):
+
+```bash
+tools/lint.sh format        # rewrite files in place
+tools/lint.sh format-check  # fail if anything is unformatted
+tools/lint.sh tidy          # run clang-tidy static analysis
+tools/lint.sh               # format-check + tidy
+
+# Or invoke the tools directly:
+clang-format -i src/ds402/State.cpp
+clang-tidy -p build src/ds402/State.cpp
+```
+
+Note: the pip-installed clang defaults to a gcc toolchain dir without libstdc++
+headers, so `.clangd` and `tools/lint.sh` pin it to gcc-11
+(`--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11`). Adjust that path if your
+libstdc++ lives elsewhere (`ls -d /usr/include/c++/*`).
 
 ## Layout
 
