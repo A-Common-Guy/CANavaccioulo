@@ -1,0 +1,17 @@
+# clangd language-server config (powers in-editor linting, completion, jump-to).
+# clangd discovers compile_commands.json (symlinked at the repo root -> build/)
+# and reads .clang-tidy + .clang-format automatically.
+CompileFlags:
+  CompilationDatabase: build
+  # The pip-installed clang defaults to the gcc-12 toolchain dir, which has no
+  # libstdc++ headers on this box. Pin it to gcc-11 (the only one with C++
+  # headers) so <cstdint> etc. resolve. Adjust if you upgrade your gcc/libstdc++.
+  Add:
+    - --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true

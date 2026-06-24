@@ -1,0 +1,29 @@
+# Static-analysis checks for stableCOPS. clangd reads this automatically; you can
+# also run it on the command line: clang-tidy -p build src/ds402/State.cpp
+#
+# HeaderFilterRegex limits warnings to our own headers (path contains
+# "stablecops"), so third_party/ and system headers stay quiet.
+---
+Checks: >
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  modernize-*,
+  readability-*,
+  cppcoreguidelines-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-avoid-c-arrays,
+  -modernize-avoid-c-arrays,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -clang-diagnostic-gcc-install-dir-libstdcxx
+
+WarningsAsErrors: ''
+HeaderFilterRegex: 'stablecops'
+FormatStyle: file

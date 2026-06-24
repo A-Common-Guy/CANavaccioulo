@@ -1,0 +1,19 @@
+# Code style for stableCOPS. Run `clang-format -i <file>` or let the editor
+# format on save. Based on Google style, tuned to the existing 4-space layout.
+---
+Language: Cpp
+BasedOnStyle: Google
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+AccessModifierOffset: -4
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+NamespaceIndentation: None
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+SortIncludes: CaseInsensitive
+IncludeBlocks: Preserve
