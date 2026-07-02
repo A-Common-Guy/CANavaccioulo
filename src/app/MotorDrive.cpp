@@ -1,108 +1,171 @@
 #include "stablecops/app/MotorDrive.hpp"
 
-#include <exception>
-#include <future>
-#include <memory>
 #include <utility>
 
-#include "stablecops/app/CanopenApplication.hpp"
+#include "stablecops/app/Bus.hpp"
 #include "stablecops/lely/MotorDriver.hpp"
 
 namespace stablecops::app {
 
-MotorDrive::MotorDrive(MotorConfig config) : config_(std::move(config)) {}
+MotorDrive::MotorDrive(MotorConfig config) : config_(std::move(config)), node_id_(config_.node_id) {
+    // Join (or create) the hidden shared bus for this interface and register
+    // this node before anyone starts the chain.
+    bus_ = Bus::getOrCreate(config_);
+    bus_->registerNode(config_);
+}
 
 MotorDrive::~MotorDrive() {
     stop();
+    // Releasing bus_ here drops this drive's reference; when the last drive on
+    // the interface is destroyed the bus tears itself down (graceful stop +
+    // join) in its destructor.
 }
 
 void MotorDrive::start() {
-    if (running_.exchange(true)) {
-        return;
-    }
-
-    std::promise<void> ready;
-    auto ready_future = ready.get_future();
-
-    loop_thread_ = std::thread([this, &ready] {
-        // Construct the application here so the FiberDriver lives on the thread
-        // that runs its tasks (required by Lely); destroy it here too.
-        std::unique_ptr<CanopenApplication> app;
-        try {
-            app = std::make_unique<CanopenApplication>(config_);
-        } catch (...) {
-            running_.store(false);
-            ready.set_exception(std::current_exception());
-            return;
-        }
-
-        app_.store(app.get(), std::memory_order_release);
-        app->resetMaster();
-        ready.set_value();
-
-        app->run();
-
-        app_.store(nullptr, std::memory_order_release);
-        app.reset();  // destroy Lely objects on the loop thread
-    });
-
-    try {
-        ready_future.get();
-    } catch (...) {
-        if (loop_thread_.joinable()) {
-            loop_thread_.join();
-        }
-        running_.store(false);
-        throw;
-    }
+    bus_->start();
 }
 
 void MotorDrive::stop() {
-    if (!loop_thread_.joinable()) {
-        running_.store(false);
-        return;
+    if (bus_ && bus_->running()) {
+        bus_->stopNode(node_id_);
     }
-    if (auto* app = app_.load(std::memory_order_acquire)) {
-        app->post([app] { app->motor().requestGracefulStop(); });
-    }
-    loop_thread_.join();
-    running_.store(false);
 }
 
 bool MotorDrive::running() const {
-    return running_.load();
+    return bus_ && bus_->running();
 }
 
 ds402::Feedback MotorDrive::feedback() const {
-    if (auto* app = app_.load(std::memory_order_acquire)) {
-        return app->feedback();
-    }
-    return {};
+    return bus_->feedback(node_id_);
 }
 
 bool MotorDrive::feedbackLive() const {
-    if (auto* app = app_.load(std::memory_order_acquire)) {
-        return app->feedbackLive();
+    return bus_->feedbackLive(node_id_);
+}
+
+stablecops::lely::CyclicStats MotorDrive::cyclicStats() const {
+    return bus_->cyclicStats();
+}
+
+double MotorDrive::positionDegrees() const {
+    if (config_.counts_per_rev == 0) {
+        return 0.0;
     }
-    return false;
+    return static_cast<double>(feedback().position) / static_cast<double>(config_.counts_per_rev) *
+           360.0;
+}
+
+double MotorDrive::positionRadians() const {
+    if (config_.counts_per_rev == 0) {
+        return 0.0;
+    }
+    constexpr double kTwoPi = 6.283185307179586;
+    return static_cast<double>(feedback().position) / static_cast<double>(config_.counts_per_rev) *
+           kTwoPi;
+}
+
+bool MotorDrive::enabled() const {
+    return feedbackLive() && feedback().state == ds402::State::OperationEnabled;
+}
+
+bool MotorDrive::faulted() const {
+    const auto fb = feedback();
+    return fb.state == ds402::State::Fault || fb.state == ds402::State::FaultReactionActive ||
+           fb.error_code != 0;
+}
+
+uint16_t MotorDrive::errorCode() const {
+    return feedback().error_code;
+}
+
+void MotorDrive::resetFault() {
+    bus_->postToDriver(node_id_,
+                       [](stablecops::lely::MotorDriver& motor) { motor.requestFaultReset(); });
+}
+
+void MotorDrive::enableOperation(bool hold_position) {
+    bus_->invokeOnDriver(node_id_, [hold_position](stablecops::lely::MotorDriver& motor) {
+        motor.requestEnableOperation(hold_position);
+    });
+}
+
+void MotorDrive::setOperationMode(ds402::OperationMode mode) {
+    bus_->invokeOnDriver(node_id_, [mode](stablecops::lely::MotorDriver& motor) {
+        motor.requestOperationMode(mode);
+    });
+}
+
+int64_t MotorDrive::readObject(uint16_t index, uint8_t subindex, ObjectDataType type) const {
+    int64_t value = 0;
+    bus_->invokeOnDriver(node_id_, [&](stablecops::lely::MotorDriver& motor) {
+        switch (type) {
+            case ObjectDataType::U8:
+                value = motor.readU8(index, subindex);
+                break;
+            case ObjectDataType::I8:
+                value = static_cast<int>(static_cast<int8_t>(motor.readU8(index, subindex)));
+                break;
+            case ObjectDataType::U16:
+                value = motor.readU16(index, subindex);
+                break;
+            case ObjectDataType::I16:
+                value = static_cast<int16_t>(motor.readU16(index, subindex));
+                break;
+            case ObjectDataType::U32:
+                value = motor.readU32(index, subindex);
+                break;
+            case ObjectDataType::I32:
+                value = motor.readI32(index, subindex);
+                break;
+        }
+    });
+    return value;
+}
+
+void MotorDrive::writeObject(uint16_t index, uint8_t subindex, ObjectDataType type, int64_t value) {
+    bus_->invokeOnDriver(node_id_,
+                         [index, subindex, type, value](stablecops::lely::MotorDriver& motor) {
+                             switch (type) {
+                                 case ObjectDataType::U8:
+                                 case ObjectDataType::I8:
+                                     motor.writeU8(index, subindex, static_cast<uint8_t>(value));
+                                     break;
+                                 case ObjectDataType::U16:
+                                 case ObjectDataType::I16:
+                                     motor.writeU16(index, subindex, static_cast<uint16_t>(value));
+                                     break;
+                                 case ObjectDataType::U32:
+                                     motor.writeU32(index, subindex, static_cast<uint32_t>(value));
+                                     break;
+                                 case ObjectDataType::I32:
+                                     motor.writeI32(index, subindex, static_cast<int32_t>(value));
+                                     break;
+                             }
+                         });
 }
 
 void MotorDrive::commandPosition(int32_t counts) {
-    if (auto* app = app_.load(std::memory_order_acquire)) {
-        app->post([app, counts] { app->motor().drive().setCspTargetPosition(counts); });
-    }
+    bus_->postToDriver(node_id_, [counts](stablecops::lely::MotorDriver& motor) {
+        motor.drive().setCspTargetPosition(counts);
+    });
 }
 
 void MotorDrive::commandVelocity(int32_t units) {
-    if (auto* app = app_.load(std::memory_order_acquire)) {
-        app->post([app, units] { app->motor().drive().setCsvTargetVelocity(units); });
-    }
+    bus_->postToDriver(node_id_, [units](stablecops::lely::MotorDriver& motor) {
+        motor.drive().setCsvTargetVelocity(units);
+    });
 }
 
 void MotorDrive::commandTorque(int16_t units) {
-    if (auto* app = app_.load(std::memory_order_acquire)) {
-        app->post([app, units] { app->motor().drive().setCstTargetTorque(units); });
-    }
+    bus_->postToDriver(node_id_, [units](stablecops::lely::MotorDriver& motor) {
+        motor.drive().setCstTargetTorque(units);
+    });
+}
+
+void MotorDrive::moveToPosition(int32_t counts, bool relative) {
+    bus_->postToDriver(node_id_, [counts, relative](stablecops::lely::MotorDriver& motor) {
+        motor.requestProfileMove(counts, relative);
+    });
 }
 
 }  // namespace stablecops::app

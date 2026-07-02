@@ -14,7 +14,9 @@
 #include <chrono>
 #include <csignal>
 #include <iostream>
+#include <stdexcept>
 #include <system_error>
+#include <utility>
 #include <time.h>
 
 namespace stablecops::app {
@@ -28,38 +30,66 @@ stablecops::lely::BootActionConfig makeBootActions(const MotorConfig& config) {
     actions.hold_position = config.hold_position_on_boot;
     actions.monitor = config.monitor_on_boot;
     actions.mode = config.operation_mode;
+    actions.profile_velocity = config.profile_velocity;
+    actions.profile_acceleration = config.profile_acceleration;
+    actions.profile_deceleration = config.profile_deceleration;
+    actions.torque_slope = config.torque_slope;
     actions.csp_target_position = config.csp_target_position;
     actions.csp_relative_move = config.csp_relative_move;
     actions.max_position_step = config.max_position_step;
+    actions.counts_per_rev = config.counts_per_rev;
     actions.state_transition_timeout = config.state_transition_timeout;
+    actions.feedback_timeout = config.feedback_timeout;
+    actions.sync_period_us = config.sync_period_us;
     return actions;
+}
+
+std::vector<MotorConfig> wrapSingle(const MotorConfig& config) {
+    return std::vector<MotorConfig>{config};
+}
+
+std::vector<MotorConfig> requireNonEmpty(std::vector<MotorConfig> configs) {
+    if (configs.empty()) {
+        throw std::invalid_argument(
+            "CanopenApplication requires at least one node config");
+    }
+    return configs;
 }
 
 }  // namespace
 
 class CanopenApplication::Impl {
 public:
-    explicit Impl(const MotorConfig& config)
-        : io_guard_(),
+    explicit Impl(std::vector<MotorConfig> node_configs)
+        : configs_(requireNonEmpty(std::move(node_configs))),
+          io_guard_(),
           context_(),
           poll_(context_),
           loop_(poll_.get_poll()),
           executor_(loop_.get_executor()),
-          controller_(config.can_interface.c_str()),
+          controller_(configs_.front().can_interface.c_str()),
           channel_(poll_, executor_),
           timer_(poll_, executor_, CLOCK_MONOTONIC),
           shutdown_timer_(poll_, executor_, CLOCK_MONOTONIC),
-          master_(timer_, channel_, config.master_dcf_path, "", config.master_node_id),
-          motor_(master_, config.node_id, makeBootActions(config),
-                 stablecops::config::loadPdoMapFromSummary(config.summary_path)),
+          master_(timer_, channel_, configs_.front().master_dcf_path, "",
+                  configs_.front().master_node_id),
           sigset_(poll_, executor_) {
         channel_.open(controller_);
 
-        // On a clean shutdown signal, de-energise the drive before stopping the
-        // loop so the joint is never left energised when the master exits.
-        motor_.setStoppedCallback([this, node_id = config.node_id] {
-            resetNodeThenExit(node_id);
-        });
+        for (const auto& config : configs_) {
+            node_ids_.push_back(config.node_id);
+            // Homogeneous chains share the same PDO object mapping, but each
+            // drive needs node-ID-specific COB-IDs on the wire.
+            const auto pdo_map =
+                stablecops::config::loadPdoMapFromSummary(config.summary_path, config.node_id);
+            auto motor = std::make_unique<stablecops::lely::MotorDriver>(
+                master_, config.node_id, makeBootActions(config), pdo_map);
+            // On a coordinated shutdown, each drive reports when it is
+            // de-energised; once all have, the bus resets and the loop stops.
+            motor->setStoppedCallback([this] { onMotorStopped(); });
+            motors_.push_back(std::move(motor));
+        }
+
         sigset_.insert(SIGINT);
         sigset_.insert(SIGTERM);
         armSignalWait();
@@ -67,11 +97,10 @@ public:
 
     void armSignalWait() {
         sigset_.submit_wait(executor_, [this](int signo) {
-            if (!stop_initiated_) {
-                stop_initiated_ = true;
+            if (!shutdown_initiated_) {
                 std::cout << "\nreceived signal " << signo
-                          << "; disabling drive and shutting down...\n";
-                motor_.requestGracefulStop();
+                          << "; disabling drives and shutting down...\n";
+                requestShutdown();
                 // Re-arm so a second signal forces an immediate stop if the
                 // controlled ramp-down stalls (e.g. lost feedback).
                 armSignalWait();
@@ -82,20 +111,79 @@ public:
         });
     }
 
-    void resetNodeThenExit(uint8_t node_id) {
-        // Reset the node as a guaranteed final de-energise: it forces the drive
-        // back through initialisation, which drops the power stage regardless of
-        // whether the DS402 disable-voltage sequence completed. Give the frame a
-        // moment to reach the drive before tearing the master down.
-        master_.Command(::lely::canopen::NmtCommand::RESET_NODE, node_id);
+    void requestShutdown() {
+        if (shutdown_initiated_) {
+            return;
+        }
+        shutdown_initiated_ = true;
+        stops_remaining_ = motors_.size();
+        for (auto& motor : motors_) {
+            motor->requestGracefulStop();
+        }
+        // Fallback: even if some drive never confirms de-energising (e.g. it
+        // already went silent), tear the bus down after a bounded grace period.
+        shutdown_deadline_ =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds{1500};
+        scheduleShutdownCheck();
+    }
+
+    void onMotorStopped() {
+        if (!shutdown_initiated_) {
+            // A single-drive de-energise that is not a full bus teardown.
+            return;
+        }
+        if (stops_remaining_ > 0) {
+            --stops_remaining_;
+        }
+        if (stops_remaining_ == 0) {
+            resetAllNodesThenExit();
+        }
+    }
+
+    void scheduleShutdownCheck() {
         shutdown_timer_.settime(std::chrono::milliseconds{50});
         shutdown_timer_.submit_wait(
-            executor_,
-            [this](int /*overrun*/, std::error_code /*ec*/) {
+            executor_, [this](int /*overrun*/, std::error_code /*ec*/) {
+                if (!shutdown_complete_ &&
+                    std::chrono::steady_clock::now() >= shutdown_deadline_) {
+                    resetAllNodesThenExit();
+                } else if (!shutdown_complete_) {
+                    scheduleShutdownCheck();
+                }
+            });
+    }
+
+    void resetAllNodesThenExit() {
+        if (shutdown_complete_) {
+            return;
+        }
+        shutdown_complete_ = true;
+        // Reset each node as a guaranteed final de-energise: it forces the drive
+        // back through initialisation, dropping the power stage regardless of
+        // whether the DS402 disable-voltage sequence completed. Give the frames
+        // a moment to reach the drives before tearing the master down.
+        for (uint8_t node_id : node_ids_) {
+            master_.Command(::lely::canopen::NmtCommand::RESET_NODE, node_id);
+        }
+        shutdown_timer_.settime(std::chrono::milliseconds{50});
+        shutdown_timer_.submit_wait(
+            executor_, [this](int /*overrun*/, std::error_code /*ec*/) {
                 context_.shutdown();
                 loop_.stop();
             });
     }
+
+    stablecops::lely::MotorDriver* motorFor(uint8_t node_id) {
+        for (std::size_t i = 0; i < node_ids_.size(); ++i) {
+            if (node_ids_[i] == node_id) {
+                return motors_[i].get();
+            }
+        }
+        return nullptr;
+    }
+
+    std::vector<MotorConfig> configs_;
+    std::vector<uint8_t> node_ids_;
 
     ::lely::io::IoGuard io_guard_;
     ::lely::io::Context context_;
@@ -107,22 +195,41 @@ public:
     ::lely::io::Timer timer_;
     ::lely::io::Timer shutdown_timer_;
     ::lely::canopen::AsyncMaster master_;
-    stablecops::lely::MotorDriver motor_;
+    std::vector<std::unique_ptr<stablecops::lely::MotorDriver>> motors_;
     ::lely::io::SignalSet sigset_;
-    bool stop_initiated_{false};
+
+    bool shutdown_initiated_{false};
+    bool shutdown_complete_{false};
+    std::size_t stops_remaining_{0};
+    std::chrono::steady_clock::time_point shutdown_deadline_{};
 };
 
+CanopenApplication::CanopenApplication(std::vector<MotorConfig> node_configs)
+    : impl_(std::make_unique<Impl>(std::move(node_configs))) {}
+
 CanopenApplication::CanopenApplication(const MotorConfig& config)
-    : impl_(std::make_unique<Impl>(config)) {}
+    : CanopenApplication(wrapSingle(config)) {}
 
 CanopenApplication::~CanopenApplication() = default;
 
+const std::vector<uint8_t>& CanopenApplication::nodeIds() const {
+    return impl_->node_ids_;
+}
+
 stablecops::lely::MotorDriver& CanopenApplication::motor() {
-    return impl_->motor_;
+    return *impl_->motors_.front();
+}
+
+stablecops::lely::MotorDriver* CanopenApplication::motorIfPresent(uint8_t node_id) {
+    return impl_->motorFor(node_id);
 }
 
 void CanopenApplication::resetMaster() {
     impl_->master_.Reset();
+}
+
+void CanopenApplication::requestShutdown() {
+    impl_->requestShutdown();
 }
 
 void CanopenApplication::post(std::function<void()> task) {
@@ -130,11 +237,29 @@ void CanopenApplication::post(std::function<void()> task) {
 }
 
 ds402::Feedback CanopenApplication::feedback() const {
-    return impl_->motor_.feedbackSnapshot();
+    return impl_->motors_.front()->feedbackSnapshot();
+}
+
+ds402::Feedback CanopenApplication::feedback(uint8_t node_id) const {
+    if (auto* motor = impl_->motorFor(node_id)) {
+        return motor->feedbackSnapshot();
+    }
+    return {};
 }
 
 bool CanopenApplication::feedbackLive() const {
-    return impl_->motor_.feedbackLive();
+    return impl_->motors_.front()->feedbackLive();
+}
+
+bool CanopenApplication::feedbackLive(uint8_t node_id) const {
+    if (auto* motor = impl_->motorFor(node_id)) {
+        return motor->feedbackLive();
+    }
+    return false;
+}
+
+stablecops::lely::CyclicStats CanopenApplication::cyclicStats() const {
+    return impl_->motors_.front()->cyclicStats();
 }
 
 void CanopenApplication::run() {

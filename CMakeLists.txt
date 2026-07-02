@@ -44,7 +44,9 @@ target_link_libraries(stablecops_config PUBLIC stablecops_lely_project_options)
 
 add_library(stablecops_runtime
     src/app/CanopenApplication.cpp
+    src/app/Bus.cpp
     src/app/MotorDrive.cpp
+    src/app/RealtimeScheduling.cpp
     src/lely/MotorDriver.cpp
 )
 target_include_directories(stablecops_runtime PUBLIC
@@ -56,6 +58,14 @@ add_executable(stablecops_master
     src/tools/stablecops_master.cpp
 )
 target_link_libraries(stablecops_master PRIVATE stablecops_runtime)
+
+add_executable(stablecops_commissiond
+    src/tools/stablecops_commissiond.cpp
+)
+target_include_directories(stablecops_commissiond PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+)
+target_link_libraries(stablecops_commissiond PRIVATE stablecops_runtime)
 
 add_executable(pdo_feedback_monitor
     examples/pdo_feedback_monitor.cpp
@@ -96,3 +106,35 @@ set_target_properties(cst_torque PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
 target_link_libraries(cst_torque PRIVATE stablecops_runtime)
+
+add_executable(pp_move
+    examples/pp_move.cpp
+)
+set_target_properties(pp_move PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
+target_link_libraries(pp_move PRIVATE stablecops_runtime)
+
+add_executable(pv_velocity
+    examples/pv_velocity.cpp
+)
+set_target_properties(pv_velocity PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
+target_link_libraries(pv_velocity PRIVATE stablecops_runtime)
+
+add_executable(pt_torque
+    examples/pt_torque.cpp
+)
+set_target_properties(pt_torque PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
+target_link_libraries(pt_torque PRIVATE stablecops_runtime)
+
+add_executable(multi_drive
+    examples/multi_drive.cpp
+)
+set_target_properties(multi_drive PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
+target_link_libraries(multi_drive PRIVATE stablecops_runtime)

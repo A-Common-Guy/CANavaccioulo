@@ -77,6 +77,7 @@ int main(int argc, char** argv) {
         std::cout << "  state=" << std::setw(20) << std::left
                   << stablecops::ds402::toString(fb.state)
                   << " pos=" << std::setw(10) << fb.position
+                  << " (" << std::setw(8) << drive.positionDegrees() << " deg)"
                   << " vel=" << std::setw(8) << fb.velocity
                   << " torq=" << fb.torque
                   << " sw=0x" << std::hex << std::setw(4) << std::setfill('0')

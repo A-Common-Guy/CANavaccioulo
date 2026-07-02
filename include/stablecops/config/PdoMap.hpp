@@ -45,4 +45,16 @@ struct PdoMap {
 // if the file cannot be opened or does not contain a "pdo_mappings" section.
 PdoMap loadPdoMapFromSummary(const std::string& summary_path);
 
+// Load the PDO layout and rebase node-ID-relative COB-IDs to `node_id`. The
+// summary stores one representative layout (usually for the first node), while a
+// homogeneous chain needs the same mapping with distinct CAN identifiers per
+// drive.
+PdoMap loadPdoMapFromSummary(const std::string& summary_path, uint8_t node_id);
+
+// Load the chain's node ids from a generated summary.json. Prefers the
+// "node_ids" array (multi-node profiles); falls back to the single "node_id"
+// for older summaries. Returns an empty vector if neither is present. Throws
+// std::runtime_error if the file cannot be opened or parsed.
+std::vector<uint8_t> loadNodeIdsFromSummary(const std::string& summary_path);
+
 }  // namespace stablecops::config

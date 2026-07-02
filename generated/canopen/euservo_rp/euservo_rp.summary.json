@@ -4,6 +4,10 @@
   "normalized_eds": "generated/canopen/euservo_rp/euservo_rp.normalized.eds",
   "master_dcf": "dcf/master.dcf",
   "node_id": 1,
+  "node_ids": [
+    1,
+    2
+  ],
   "master_node_id": 127,
   "identity_policy": "ignore",
   "pdo_policy": "cyclic-superset",

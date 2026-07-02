@@ -13,9 +13,15 @@ master:
   reset_all_nodes: false
   stop_all_nodes: false
   boot_time: 5000
-rp_joint:
+rp_joint_1:
   dcf: generated/canopen/euservo_rp/euservo_rp.normalized.eds
   node_id: 1
   mandatory: true
+  boot: true
+  reset_communication: true
+rp_joint_2:
+  dcf: generated/canopen/euservo_rp/euservo_rp.normalized.eds
+  node_id: 2
+  mandatory: false
   boot: true
   reset_communication: true

@@ -52,6 +52,20 @@ rejected if the requested step exceeds `--max-position-step`.
 build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --csp-relative 1000 --max-position-step 1000 --run
 ```
 
+For interactive bench work, run the local browser commissioning daemon instead
+of hand-sending SDOs or raw CAN frames:
+
+```bash
+build/stablecops_commissiond --can can0 --dcf dcf/master.dcf --node 1 --mode csp
+```
+
+It reuses `stablecops::app::MotorDrive`: feedback comes from the generated TPDO
+summary, Enable/Stop/Fault Reset use the same CiA402 ladder as the CLI, and
+motion commands call `commandPosition`, `commandVelocity`, `commandTorque`, or
+`moveToPosition`. The object panel is intentionally typed and low-level for
+parameters/diagnostics; mapped command objects such as `0x6040`, `0x607A`,
+`0x60FF`, and `0x6071` remain PDO-driven on this firmware.
+
 Available boot actions:
 
 - `--enable`: run the DS402 safe enable sequence.
@@ -77,6 +91,21 @@ Required fields:
 
 Generated artifacts are written to `generation.generated_dir`; the runtime DCF
 is written to `generation.dcf_dir`.
+
+For a chain of identical joints, replace the single `node:` mapping with a
+`nodes:` list (the generator accepts either). All nodes share this same EDS and
+PDO layout, differing only by node id:
+
+```yaml
+nodes:
+  - { name: rp_joint_1, node_id: 1 }
+  - { name: rp_joint_2, node_id: 2 }
+  - { name: rp_joint_3, node_id: 3 }
+```
+
+`dcfgen` emits one slave section per node and builds the master's RPDO/TPDO
+image for every slave; the summary records all of them under `node_ids` (and
+keeps `node_id` as the first, for single-node call sites).
 
 ## Generated Files
 
@@ -182,16 +211,14 @@ is aborted with the SDO abort code rather than starting a node that cannot
 communicate.
 
 The mode object `0x6060` is kept **out of the cyclic RxPDO** (streaming it is
-exactly what makes the firmware reject RxPDO1), but it *is* selected over SDO
-here when a mode is requested (`--mode csp|csv|cst`, or `MotorConfig::
-operation_mode`). The RP manual writes `0x6060` over SDO while the node is
-pre-operational, which is the window `OnConfig` runs in. This is distinct from
-the *target/controlword* command objects (`0x6040`, `0x607A`, `0x60FF`,
-`0x6071`), which remain PDO-only on this firmware and abort SDO downloads with
-`0x00000002`. When no mode is requested the write is skipped and the drive's
-persisted mode (factory default `8`, CSP) is left in place, preserving the
-original CSP-only behaviour. If the `0x6060` write ever aborts, the boot fails
-with that abort code rather than silently running the wrong mode.
+exactly what makes the firmware reject RxPDO1), but it is SDO-writable while the
+node is pre-operational, so it is selected over SDO here when a mode is requested
+(`--mode csp|csv|cst`, or `MotorConfig::operation_mode`) — the window `OnConfig`
+runs in. This is distinct from the *target/controlword* command objects
+(`0x6040`, `0x607A`, `0x60FF`, `0x6071`), which are PDO-only on this firmware and
+abort SDO downloads with `0x00000002`. When no mode is requested the write is
+skipped and the drive's persisted mode (factory default `8`, CSP) is left in
+place, preserving the original CSP-only behaviour.
 
 ### Enable sequence
 
@@ -209,6 +236,104 @@ steps larger than the configured guard.
 
 Add explicit PDO remapping to a profile only when the vendor default layout is
 insufficient and the drive documentation confirms the remap sequence.
+
+### Safety: feedback watchdog and fault recovery
+
+Two guards run entirely on the cyclic path, in the same non-blocking style as the
+graceful stop and the Profile Position handshake:
+
+- **Feedback-staleness watchdog.** Every received TPDO frame stamps
+  `last_feedback_time_` (in `OnRpdoWrite`). Each `OnSync` recomputes staleness
+  against `feedback_timeout`; `feedbackLive()` is published as
+  `received-at-least-one && not-stale` (no longer latched), so readers and the
+  facade can trust it. While the drive is energised, going stale logs once and
+  calls `requestGracefulStop`, which streams disable-voltage and force-finishes
+  at its deadline even if the drive never answers — so a drive that drops off the
+  bus mid-motion is always de-energised. A `feedback_timeout` of 0 disables it.
+- **Fault logging and recovery.** `OnSync` logs the edge into/out of a fault
+  (statusword + error code) so faults during cyclic operation are visible.
+  `requestFaultReset` (exposed as `MotorDrive::resetFault`) first resets the
+  targets to a safe hold (zero velocity/torque, position glued to actual), then
+  runs a non-blocking ladder from `OnSync`: a controlword bit-7 fault-reset edge,
+  then `shutdown -> switch on -> enable operation`, confirming each transition
+  from cached statusword. It recovers to operation enabled when the drive was
+  configured to run, otherwise clears the fault and leaves it safely disabled; a
+  timeout or re-fault drops to disable-voltage. Only one controlword driver runs
+  per cycle, in priority order: graceful stop > fault recovery > setpoint
+  handshake.
+
+### Profile modes (PP / PV / PT)
+
+Profile modes reuse the same fixed PDO layout and the same SDO mode select
+(`0x6060`). Their **profile parameters** are ordinary configuration objects, so
+they are written over SDO during the same pre-operational window when provided
+via `MotorConfig` (`configureProfileParameters`): profile velocity (`0x6081`),
+acceleration (`0x6083`), deceleration (`0x6084`), torque slope (`0x6087`).
+
+- **Profile Velocity / Profile Torque** stream the same `target_velocity` /
+  `target_torque` objects as CSV / CST; the drive applies its own ramp instead
+  of following the setpoint directly, so `commandVelocity` / `commandTorque`
+  work unchanged.
+- **Profile Position** needs the DS402 new-setpoint handshake. `moveToPosition`
+  stages the target into the cyclic image and arms `advanceProfileSetpoint`,
+  which (from `OnSync`) pulses controlword bit 4 (new setpoint, with
+  change-immediately and optional relative), waits for statusword bit 12
+  (setpoint acknowledge), then drops bit 4 — producing the rising edge coherently
+  in the cyclic stream. The drive then runs the trajectory itself.
+
+## Multiple Drives And The Real-Time Loop
+
+A CAN interface is a shared resource: one Lely master, one event-loop thread,
+one SYNC stream. Every drive on that wire is stepped by that single SYNC, so the
+runtime models a chain as **one master with one `MotorDriver` per node**, all
+sharing the master and SYNC. Each `MotorDriver` keeps its own DS402 state
+machine, cyclic PDO image, feedback watchdog, and fault recovery, so the
+per-drive behaviour above is unchanged; only the count changes.
+
+### Ownership: the hidden bus
+
+Applications hold only `stablecops::app::MotorDrive` handles. Each names a CAN
+interface and a node id. Drives that name the same interface transparently share
+one hidden, ref-counted `Bus` (keyed by interface name in a process-wide
+registry); different interfaces get fully independent buses, each with its own
+loop thread and SYNC. So "several chains" is just constructing `MotorDrive`s
+with different interface names.
+
+Lifecycle is static: construct all drives for a chain, then `start()` any one of
+them. The first `start()` builds the Lely application for **all** registered
+nodes on the loop thread (FiberDrivers must live on the thread that runs their
+tasks) and resets the master once, booting the whole chain; sibling `start()`s
+are no-ops. The last `MotorDrive` released on an interface tears the bus down
+with a coordinated graceful stop (every drive de-energised, all nodes reset,
+then the loop stops). Bus-level config (`can_interface`, `master_dcf_path`,
+`summary_path`, `master_node_id`, `sync_period_us`, `rt`) must match across all
+drives on one interface; a mismatch throws at construction.
+
+`stablecops_master --nodes 1,2,3` does the same from the CLI (one config per
+node, shared bus-level fields).
+
+### Deterministic cadence (latency / jitter)
+
+The cadence stays the master's SYNC (driven by `master.sync_period` in the DCF,
+`CLOCK_MONOTONIC`); we make it deterministic by tuning the loop thread rather
+than changing the timing source. The cyclic path is already allocation-free
+(`OnSync` only reads/writes the cached PDO images), so the remaining jitter is
+scheduling. `RtConfig` (`MotorConfig::rt`, or `--rt/--rt-prio/--rt-cpu/--no-mlock`)
+opts the loop thread into:
+
+- `SCHED_FIFO` at a configurable priority (real-time scheduling class),
+- optional CPU pinning (pair with `isolcpus` to keep other work off the core),
+- `mlockall` + a stack prefault to keep the cyclic path off the pager.
+
+It is best-effort: each step degrades gracefully with a single warning if the
+process lacks privileges (`CAP_SYS_NICE`, `rtprio`/`memlock` ulimits), so an
+unprivileged run still works at normal priority.
+
+Achieved cadence is measured on the loop thread in `OnSync` (interval between
+consecutive SYNCs) and published as `CyclicStats` — interval min/max/mean and
+the worst-case absolute deviation from the nominal `sync_period_us`. Read it via
+`MotorDrive::cyclicStats()` or the CLI `--stats` readout to verify latency and
+jitter on the target machine.
 
 ## Wire-Level Verification
 
@@ -232,15 +357,16 @@ What healthy bring-up looks like:
 - `0x181` statusword tracks the transitions (`31 06` ready to switch on ->
   `33 06` switched on -> `37 06` operation enabled), error code stays `0`.
 
-The drive accepts SDO writes to **PDO communication/mapping** objects only while
-pre-operational (this is what `OnConfig` relies on). The DS402 **command**
-objects (`0x6040`, `0x6060`, `0x607A`, ...) are PDO-only and abort with
-`0x00000002` in any state, which is why they go over PDO:
+The drive accepts SDO writes to **PDO communication/mapping** objects and to the
+mode object `0x6060` while pre-operational (this is what `OnConfig` relies on).
+The DS402 **target/controlword** objects (`0x6040`, `0x607A`, `0x60FF`, `0x6071`)
+are PDO-only and abort SDO downloads with `0x00000002`, which is why they go over
+PDO:
 
 ```bash
-# SDO download 0x6060 = 8; aborts (581 ... 80) with abort code 0x00000002
-# regardless of NMT state -- command objects are PDO-only on this firmware
-cansend can0 601#2F60600008
+# SDO download of a target object (e.g. 0x607A) aborts (581 ... 80) with
+# abort code 0x00000002 -- target/controlword objects are PDO-only on this firmware
+cansend can0 601#2360 7A00 00000000
 candump -tz can0,581:7FF
 ```
 

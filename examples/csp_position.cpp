@@ -80,8 +80,9 @@ int main(int argc, char** argv) {
         drive.commandPosition(target);
         const auto fb = drive.feedback();
         std::cout << "  state=" << stablecops::ds402::toString(fb.state)
-                  << " pos=" << fb.position << " target=" << target << " vel=" << fb.velocity << '\n';
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                  << " pos=" << fb.position << " (" << drive.positionDegrees()
+                  << " deg) target=" << target << " vel=" << fb.velocity << '\n';
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     drive.stop();

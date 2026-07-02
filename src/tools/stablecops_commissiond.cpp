@@ -1,0 +1,894 @@
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+#include "nlohmann/json.hpp"
+#include "stablecops/app/MotorConfig.hpp"
+#include "stablecops/app/MotorDrive.hpp"
+#include "stablecops/ds402/State.hpp"
+
+namespace {
+
+using json = nlohmann::json;
+
+std::atomic<bool> g_stop_requested{false};
+
+void handleSignal(int /*signal*/) {
+    g_stop_requested.store(true);
+}
+
+std::optional<stablecops::ds402::OperationMode> parseOperationMode(const std::string& name) {
+    using stablecops::ds402::OperationMode;
+    if (name == "csp") {
+        return OperationMode::CyclicSynchronousPosition;
+    }
+    if (name == "csv") {
+        return OperationMode::CyclicSynchronousVelocity;
+    }
+    if (name == "cst") {
+        return OperationMode::CyclicSynchronousTorque;
+    }
+    if (name == "pp") {
+        return OperationMode::ProfilePosition;
+    }
+    if (name == "pv") {
+        return OperationMode::ProfileVelocity;
+    }
+    if (name == "pt") {
+        return OperationMode::ProfileTorque;
+    }
+    return std::nullopt;
+}
+
+std::string trim(const std::string& value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::string lower(std::string value) {
+    for (char& ch : value) {
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<char>(ch - 'A' + 'a');
+        }
+    }
+    return value;
+}
+
+uint64_t parseUnsignedText(const std::string& text, uint64_t max_value) {
+    std::size_t consumed = 0;
+    const auto value = std::stoull(text, &consumed, 0);
+    if (consumed != text.size() || value > max_value) {
+        throw std::invalid_argument("numeric value out of range: " + text);
+    }
+    return value;
+}
+
+int64_t parseSignedText(const std::string& text) {
+    std::size_t consumed = 0;
+    const auto value = std::stoll(text, &consumed, 0);
+    if (consumed != text.size()) {
+        throw std::invalid_argument("invalid numeric value: " + text);
+    }
+    return value;
+}
+
+uint16_t parseIndex(const json& body) {
+    if (!body.contains("index")) {
+        throw std::invalid_argument("missing index");
+    }
+    if (body["index"].is_string()) {
+        return static_cast<uint16_t>(parseUnsignedText(body["index"].get<std::string>(), 0xFFFF));
+    }
+    return static_cast<uint16_t>(body.at("index").get<uint32_t>());
+}
+
+uint8_t parseSubindex(const json& body) {
+    if (!body.contains("subindex")) {
+        return 0;
+    }
+    if (body["subindex"].is_string()) {
+        return static_cast<uint8_t>(parseUnsignedText(body["subindex"].get<std::string>(), 0xFF));
+    }
+    return static_cast<uint8_t>(body.at("subindex").get<uint32_t>());
+}
+
+int64_t parseBodyValue(const json& body) {
+    if (!body.contains("value")) {
+        throw std::invalid_argument("missing value");
+    }
+    if (body["value"].is_string()) {
+        return parseSignedText(body["value"].get<std::string>());
+    }
+    return body.at("value").get<int64_t>();
+}
+
+stablecops::app::ObjectDataType parseObjectType(const json& body) {
+    const auto type = lower(body.value("type", "u32"));
+    using stablecops::app::ObjectDataType;
+    if (type == "u8") {
+        return ObjectDataType::U8;
+    }
+    if (type == "i8") {
+        return ObjectDataType::I8;
+    }
+    if (type == "u16") {
+        return ObjectDataType::U16;
+    }
+    if (type == "i16") {
+        return ObjectDataType::I16;
+    }
+    if (type == "u32") {
+        return ObjectDataType::U32;
+    }
+    if (type == "i32") {
+        return ObjectDataType::I32;
+    }
+    throw std::invalid_argument("unknown object type: " + type);
+}
+
+std::string objectTypeName(stablecops::app::ObjectDataType type) {
+    using stablecops::app::ObjectDataType;
+    switch (type) {
+        case ObjectDataType::U8:
+            return "u8";
+        case ObjectDataType::I8:
+            return "i8";
+        case ObjectDataType::U16:
+            return "u16";
+        case ObjectDataType::I16:
+            return "i16";
+        case ObjectDataType::U32:
+            return "u32";
+        case ObjectDataType::I32:
+            return "i32";
+    }
+    return "unknown";
+}
+
+std::string hexValue(uint64_t value, int width) {
+    std::ostringstream stream;
+    stream << "0x" << std::uppercase << std::hex << std::setw(width) << std::setfill('0') << value;
+    return stream.str();
+}
+
+std::string objectValueHex(int64_t value, stablecops::app::ObjectDataType type) {
+    using stablecops::app::ObjectDataType;
+    switch (type) {
+        case ObjectDataType::U8:
+        case ObjectDataType::I8:
+            return hexValue(static_cast<uint8_t>(value), 2);
+        case ObjectDataType::U16:
+        case ObjectDataType::I16:
+            return hexValue(static_cast<uint16_t>(value), 4);
+        case ObjectDataType::U32:
+        case ObjectDataType::I32:
+            return hexValue(static_cast<uint32_t>(value), 8);
+    }
+    return "0x0";
+}
+
+json commonObjects() {
+    return json::array({
+        {{"name", "Statusword"},
+         {"index", "0x6041"},
+         {"subindex", 0},
+         {"type", "u16"},
+         {"access", "read"},
+         {"note", "TPDO cached when feedback is live"}},
+        {{"name", "Mode request"},
+         {"index", "0x6060"},
+         {"subindex", 0},
+         {"type", "i8"},
+         {"access", "read/write"},
+         {"note", "Best selected at daemon boot with --mode"}},
+        {{"name", "Mode display"},
+         {"index", "0x6061"},
+         {"subindex", 0},
+         {"type", "i8"},
+         {"access", "read"},
+         {"note", "TPDO cached when feedback is live"}},
+        {{"name", "Position actual value"},
+         {"index", "0x6064"},
+         {"subindex", 0},
+         {"type", "i32"},
+         {"access", "read"},
+         {"note", "Output-shaft counts"}},
+        {{"name", "Velocity actual value"},
+         {"index", "0x606C"},
+         {"subindex", 0},
+         {"type", "i32"},
+         {"access", "read"},
+         {"note", "Drive velocity units"}},
+        {{"name", "Torque actual value"},
+         {"index", "0x6077"},
+         {"subindex", 0},
+         {"type", "i16"},
+         {"access", "read"},
+         {"note", "Drive torque units"}},
+        {{"name", "Error code"},
+         {"index", "0x603F"},
+         {"subindex", 0},
+         {"type", "u16"},
+         {"access", "read"},
+         {"note", "CiA402 error code"}},
+        {{"name", "Profile velocity"},
+         {"index", "0x6081"},
+         {"subindex", 0},
+         {"type", "u32"},
+         {"access", "read/write"},
+         {"note", "Profile-position cruise speed"}},
+        {{"name", "Profile acceleration"},
+         {"index", "0x6083"},
+         {"subindex", 0},
+         {"type", "u32"},
+         {"access", "read/write"},
+         {"note", "Profile ramp"}},
+        {{"name", "Profile deceleration"},
+         {"index", "0x6084"},
+         {"subindex", 0},
+         {"type", "u32"},
+         {"access", "read/write"},
+         {"note", "Profile ramp"}},
+        {{"name", "Torque slope"},
+         {"index", "0x6087"},
+         {"subindex", 0},
+         {"type", "u32"},
+         {"access", "read/write"},
+         {"note", "Profile torque ramp"}},
+        {{"name", "Encoder single-turn primary"},
+         {"index", "0x276F"},
+         {"subindex", 0},
+         {"type", "i32"},
+         {"access", "read"},
+         {"note", "Vendor raw encoder monitor"}},
+        {{"name", "Encoder single-turn 3"},
+         {"index", "0x2772"},
+         {"subindex", 0},
+         {"type", "i32"},
+         {"access", "read"},
+         {"note", "Vendor raw encoder monitor"}},
+        {{"name", "Encoder increments"},
+         {"index", "0x608F"},
+         {"subindex", 1},
+         {"type", "u32"},
+         {"access", "read"},
+         {"note", "Scaling numerator"}},
+        {{"name", "Gear ratio shaft revolutions"},
+         {"index", "0x6091"},
+         {"subindex", 2},
+         {"type", "u32"},
+         {"access", "read"},
+         {"note", "Default counts/rev reference"}},
+    });
+}
+
+struct HttpRequest {
+    std::string method;
+    std::string path;
+    std::map<std::string, std::string> headers;
+    std::string body;
+};
+
+struct HttpResponse {
+    int status{200};
+    std::string content_type{"application/json"};
+    std::string body;
+};
+
+std::string reasonPhrase(int status) {
+    switch (status) {
+        case 200:
+            return "OK";
+        case 400:
+            return "Bad Request";
+        case 404:
+            return "Not Found";
+        case 405:
+            return "Method Not Allowed";
+        case 500:
+            return "Internal Server Error";
+        default:
+            return "Error";
+    }
+}
+
+HttpResponse jsonResponse(const json& body, int status = 200) {
+    return {status, "application/json", body.dump(2)};
+}
+
+HttpResponse errorResponse(int status, const std::string& message) {
+    return jsonResponse({{"ok", false}, {"error", message}}, status);
+}
+
+std::optional<HttpRequest> readHttpRequest(int fd) {
+    std::string data;
+    char buffer[4096];
+    while (data.find("\r\n\r\n") == std::string::npos) {
+        const auto n = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (n <= 0) {
+            return std::nullopt;
+        }
+        data.append(buffer, static_cast<std::size_t>(n));
+        if (data.size() > 1024 * 1024) {
+            throw std::runtime_error("request too large");
+        }
+    }
+
+    const auto header_end = data.find("\r\n\r\n");
+    std::istringstream headers(data.substr(0, header_end));
+    std::string request_line;
+    std::getline(headers, request_line);
+    request_line = trim(request_line);
+
+    std::istringstream request_parts(request_line);
+    HttpRequest request;
+    std::string target;
+    request_parts >> request.method >> target;
+    const auto query = target.find('?');
+    request.path = target.substr(0, query);
+
+    std::string line;
+    while (std::getline(headers, line)) {
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        request.headers[lower(trim(line.substr(0, colon)))] = trim(line.substr(colon + 1));
+    }
+
+    std::size_t content_length = 0;
+    const auto content_length_it = request.headers.find("content-length");
+    if (content_length_it != request.headers.end()) {
+        content_length =
+            static_cast<std::size_t>(parseUnsignedText(content_length_it->second, 1024 * 1024));
+    }
+
+    request.body = data.substr(header_end + 4);
+    while (request.body.size() < content_length) {
+        const auto n = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (n <= 0) {
+            throw std::runtime_error("connection closed while reading body");
+        }
+        request.body.append(buffer, static_cast<std::size_t>(n));
+    }
+    if (request.body.size() > content_length) {
+        request.body.resize(content_length);
+    }
+
+    return request;
+}
+
+void sendHttpResponse(int fd, const HttpResponse& response) {
+    std::ostringstream stream;
+    stream << "HTTP/1.1 " << response.status << ' ' << reasonPhrase(response.status)
+           << "\r\nContent-Type: " << response.content_type
+           << "\r\nContent-Length: " << response.body.size()
+           << "\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n"
+           << response.body;
+    const auto wire = stream.str();
+    const char* cursor = wire.data();
+    std::size_t remaining = wire.size();
+    while (remaining > 0) {
+        const auto sent = ::send(fd, cursor, remaining, 0);
+        if (sent <= 0) {
+            return;
+        }
+        cursor += sent;
+        remaining -= static_cast<std::size_t>(sent);
+    }
+}
+
+class HttpServer {
+public:
+    using Handler = std::function<HttpResponse(const HttpRequest&)>;
+
+    HttpServer(std::string host, uint16_t port, Handler handler)
+        : host_(std::move(host)), port_(port), handler_(std::move(handler)) {}
+
+    void run() {
+        const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd < 0) {
+            throw std::runtime_error("socket() failed");
+        }
+
+        int reuse = 1;
+        ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(port_);
+        if (host_ == "0.0.0.0") {
+            address.sin_addr.s_addr = INADDR_ANY;
+        } else if (::inet_pton(AF_INET, host_.c_str(), &address.sin_addr) != 1) {
+            ::close(listen_fd);
+            throw std::runtime_error("invalid IPv4 bind address: " + host_);
+        }
+
+        if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
+            const std::string error = std::strerror(errno);
+            ::close(listen_fd);
+            throw std::runtime_error("bind() failed: " + error);
+        }
+        if (::listen(listen_fd, 16) < 0) {
+            const std::string error = std::strerror(errno);
+            ::close(listen_fd);
+            throw std::runtime_error("listen() failed: " + error);
+        }
+
+        std::cout << "commissioning UI: http://" << host_ << ':' << port_ << "/\n";
+        while (!g_stop_requested.load()) {
+            pollfd pfd{listen_fd, POLLIN, 0};
+            const int ready = ::poll(&pfd, 1, 250);
+            if (ready <= 0) {
+                continue;
+            }
+            const int client_fd = ::accept(listen_fd, nullptr, nullptr);
+            if (client_fd < 0) {
+                continue;
+            }
+            try {
+                if (const auto request = readHttpRequest(client_fd)) {
+                    sendHttpResponse(client_fd, handler_(*request));
+                }
+            } catch (const std::exception& exception) {
+                sendHttpResponse(client_fd, errorResponse(400, exception.what()));
+            }
+            ::close(client_fd);
+        }
+
+        ::close(listen_fd);
+    }
+
+private:
+    std::string host_;
+    uint16_t port_;
+    Handler handler_;
+};
+
+const char* indexHtml() {
+    return R"HTML(<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>stableCOPS Commissioning</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; background: #111827; color: #e5e7eb; }
+    body { margin: 0; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: 26px; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+    .card { background: #1f2937; border: 1px solid #374151; border-radius: 12px; padding: 16px; box-shadow: 0 10px 30px #0004; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: center; margin: 6px 0; }
+    label { color: #9ca3af; font-size: 13px; }
+    input, select, button { border-radius: 8px; border: 1px solid #4b5563; padding: 9px 10px; background: #111827; color: #f9fafb; }
+    button { cursor: pointer; background: #2563eb; border-color: #3b82f6; font-weight: 600; }
+    button.warn { background: #b45309; border-color: #d97706; }
+    button.danger { background: #b91c1c; border-color: #ef4444; }
+    button.secondary { background: #374151; border-color: #6b7280; }
+    .status { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric { background: #111827; border-radius: 8px; padding: 10px; }
+    .metric span { display: block; color: #9ca3af; font-size: 12px; }
+    .metric strong { display: block; margin-top: 4px; font-size: 15px; overflow-wrap: anywhere; }
+    .ok { color: #34d399; }
+    .bad { color: #f87171; }
+    .note { color: #9ca3af; font-size: 13px; line-height: 1.45; }
+    pre { white-space: pre-wrap; background: #030712; border-radius: 8px; padding: 12px; min-height: 60px; max-height: 220px; overflow: auto; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>stableCOPS Commissioning</h1>
+  <p class="note">Local browser UI for CANopen/CiA402 bring-up. Motion buttons use the existing MotorDrive/CiA402 path; SDO fields are for parameters and diagnostics.</p>
+  <div class="grid">
+    <section class="card">
+      <h2>Drive Status</h2>
+      <div id="status" class="status"></div>
+      <div class="actions">
+        <button onclick="post('/api/enable', {hold:true})">Enable + Hold</button>
+        <button class="secondary" onclick="post('/api/enable', {hold:false})">Enable</button>
+        <button class="warn" onclick="post('/api/fault-reset', {})">Fault Reset</button>
+        <button class="danger" onclick="post('/api/stop', {})">Stop</button>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Motion</h2>
+      <div class="row"><label>Operation mode (0x6060)</label><select id="mode"><option value="csp">CSP - cyclic synchronous position</option><option value="csv">CSV - cyclic synchronous velocity</option><option value="cst">CST - cyclic synchronous torque</option><option value="pp">PP - profile position</option><option value="pv">PV - profile velocity</option><option value="pt">PT - profile torque</option></select></div>
+      <div class="row"><label>Command</label><select id="moveType" onchange="syncModeFromMove()"><option value="csp">CSP target position</option><option value="csp-relative">CSP relative step</option><option value="pp">Profile position absolute</option><option value="pp-relative">Profile position relative</option><option value="velocity">Velocity target</option><option value="torque">Torque target</option></select></div>
+      <div class="row"><label>Value</label><input id="moveValue" value="0"></div>
+      <div class="actions"><button class="secondary" onclick="setMode()">Send Mode (0x6060)</button><button onclick="move()">Send Motion Command</button></div>
+      <p class="note">Send the operation mode before enabling or before the first setpoint. The drive can reject runtime mode writes depending on state; the daemon reports that SDO error instead of hiding it.</p>
+    </section>
+    <section class="card">
+      <h2>Read / Write Object</h2>
+      <div class="row"><label>Common object</label><select id="commonObjects" onchange="pickObject()"></select></div>
+      <div class="row"><label>Index</label><input id="index" value="0x6064"></div>
+      <div class="row"><label>Subindex</label><input id="subindex" value="0"></div>
+      <div class="row"><label>Type</label><select id="type"><option>i32</option><option>u32</option><option>i16</option><option>u16</option><option>i8</option><option>u8</option></select></div>
+      <div class="row"><label>Write value</label><input id="writeValue" value="0"></div>
+      <div class="actions">
+        <button onclick="sdoRead()">Read</button>
+        <button class="warn" onclick="sdoWrite()">Write</button>
+      </div>
+      <p class="note">On this RP firmware, target/controlword objects are PDO driven once mapped; use Motion and Enable controls for those instead of manual SDO writes.</p>
+    </section>
+    <section class="card">
+      <h2>Result</h2>
+      <pre id="log">Ready.</pre>
+    </section>
+  </div>
+  <script>
+    let objects = [];
+    const $ = id => document.getElementById(id);
+    async function api(path, options = {}) {
+      const response = await fetch(path, options);
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!response.ok) throw new Error(data.error || text || response.statusText);
+      return data;
+    }
+    async function post(path, body) {
+      try {
+        const data = await api(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+        log(data);
+        await refresh();
+      } catch (error) { log({ok:false, error: error.message}); }
+    }
+    function requestObject() {
+      return {index: $('index').value, subindex: $('subindex').value, type: $('type').value};
+    }
+    async function sdoRead() { await post('/api/sdo/read', requestObject()); }
+    async function sdoWrite() { await post('/api/sdo/write', {...requestObject(), value: $('writeValue').value}); }
+    async function setMode() { await post('/api/mode', {mode: $('mode').value}); }
+    function modeForMove(kind) {
+      if (kind.startsWith('csp')) return 'csp';
+      if (kind.startsWith('pp')) return 'pp';
+      if (kind === 'velocity') return 'csv';
+      if (kind === 'torque') return 'cst';
+      return 'csp';
+    }
+    function syncModeFromMove() { $('mode').value = modeForMove($('moveType').value); }
+    async function move() {
+      const kind = $('moveType').value;
+      const body = {type: kind.replace('-relative', ''), value: $('moveValue').value, relative: kind.endsWith('-relative')};
+      await post('/api/move', body);
+    }
+    function metric(label, value, cls = '') {
+      return `<div class="metric"><span>${label}</span><strong class="${cls}">${value}</strong></div>`;
+    }
+    async function refresh() {
+      try {
+        const s = await api('/api/status');
+        $('status').innerHTML = [
+          metric('Feedback', s.feedback_live ? 'live' : 'stale', s.feedback_live ? 'ok' : 'bad'),
+          metric('CiA402', s.enabled ? 'operation enabled' : s.feedback.state, s.enabled ? 'ok' : ''),
+          metric('Mode', s.feedback.mode),
+          metric('Position', `${s.feedback.position} counts`),
+          metric('Angle', `${s.feedback.position_degrees.toFixed(3)} deg`),
+          metric('Velocity', s.feedback.velocity),
+          metric('Torque', s.feedback.torque),
+          metric('Error', s.feedback.error_code_hex, s.faulted ? 'bad' : 'ok')
+        ].join('');
+      } catch (error) {
+        $('status').innerHTML = metric('Server', error.message, 'bad');
+      }
+    }
+    async function loadObjects() {
+      objects = (await api('/api/objects')).objects;
+      $('commonObjects').innerHTML = objects.map((o, i) => `<option value="${i}">${o.index}:${o.subindex} ${o.name}</option>`).join('');
+      pickObject();
+    }
+    function pickObject() {
+      const o = objects[Number($('commonObjects').value)];
+      if (!o) return;
+      $('index').value = o.index;
+      $('subindex').value = o.subindex;
+      $('type').value = o.type;
+    }
+    function log(value) { $('log').textContent = JSON.stringify(value, null, 2); }
+    loadObjects().then(refresh);
+    setInterval(refresh, 500);
+  </script>
+</body>
+</html>)HTML";
+}
+
+json feedbackJson(stablecops::app::MotorDrive& drive) {
+    const auto feedback = drive.feedback();
+    const auto stats = drive.cyclicStats();
+    return {
+        {"running", drive.running()},
+        {"feedback_live", drive.feedbackLive()},
+        {"enabled", drive.enabled()},
+        {"faulted", drive.faulted()},
+        {"feedback",
+         {{"statusword", feedback.statusword},
+          {"statusword_hex", hexValue(feedback.statusword, 4)},
+          {"state", stablecops::ds402::toString(feedback.state)},
+          {"mode", stablecops::ds402::toString(feedback.mode)},
+          {"position", feedback.position},
+          {"position_degrees", drive.positionDegrees()},
+          {"position_radians", drive.positionRadians()},
+          {"velocity", feedback.velocity},
+          {"torque", feedback.torque},
+          {"error_code", feedback.error_code},
+          {"error_code_hex", hexValue(feedback.error_code, 4)}}},
+        {"cyclic_stats",
+         {{"cycles", stats.cycles},
+          {"last_us", stats.last_us},
+          {"min_us", stats.min_us},
+          {"max_us", stats.max_us},
+          {"mean_us", stats.mean_us},
+          {"max_jitter_us", stats.max_jitter_us}}},
+    };
+}
+
+int32_t checkedI32(int64_t value, const char* field) {
+    if (value < std::numeric_limits<int32_t>::min() ||
+        value > std::numeric_limits<int32_t>::max()) {
+        throw std::invalid_argument(std::string(field) + " is outside int32 range");
+    }
+    return static_cast<int32_t>(value);
+}
+
+int16_t checkedI16(int64_t value, const char* field) {
+    if (value < std::numeric_limits<int16_t>::min() ||
+        value > std::numeric_limits<int16_t>::max()) {
+        throw std::invalid_argument(std::string(field) + " is outside int16 range");
+    }
+    return static_cast<int16_t>(value);
+}
+
+void checkPositionStep(int64_t current, int64_t target, int32_t max_step) {
+    const auto delta = target - current;
+    if (std::llabs(delta) > max_step) {
+        throw std::invalid_argument("requested position step exceeds max-position-step");
+    }
+}
+
+class CommissioningApi {
+public:
+    CommissioningApi(stablecops::app::MotorDrive& drive, int32_t max_position_step)
+        : drive_(drive), max_position_step_(max_position_step) {}
+
+    HttpResponse operator()(const HttpRequest& request) {
+        try {
+            if (request.method == "GET" && request.path == "/") {
+                return {200, "text/html; charset=utf-8", indexHtml()};
+            }
+            if (request.method == "GET" && request.path == "/api/status") {
+                return jsonResponse(feedbackJson(drive_));
+            }
+            if (request.method == "GET" && request.path == "/api/objects") {
+                return jsonResponse({{"ok", true}, {"objects", commonObjects()}});
+            }
+            if (request.method != "POST") {
+                return errorResponse(404, "unknown endpoint");
+            }
+
+            const json body = request.body.empty() ? json::object() : json::parse(request.body);
+            if (request.path == "/api/enable") {
+                drive_.enableOperation(body.value("hold", true));
+                return jsonResponse({{"ok", true}, {"action", "enable"}});
+            }
+            if (request.path == "/api/stop") {
+                drive_.stop();
+                return jsonResponse({{"ok", true}, {"action", "stop"}});
+            }
+            if (request.path == "/api/fault-reset") {
+                drive_.resetFault();
+                return jsonResponse({{"ok", true}, {"action", "fault-reset"}});
+            }
+            if (request.path == "/api/mode") {
+                if (!body.contains("mode") || !body["mode"].is_string()) {
+                    return errorResponse(400, "missing mode");
+                }
+                const auto mode_name = body["mode"].get<std::string>();
+                const auto mode = parseOperationMode(mode_name);
+                if (!mode) {
+                    return errorResponse(400, "unknown mode: " + mode_name);
+                }
+                drive_.setOperationMode(*mode);
+                return jsonResponse({{"ok", true},
+                                     {"action", "mode"},
+                                     {"mode", mode_name},
+                                     {"mode_text", stablecops::ds402::toString(*mode)}});
+            }
+            if (request.path == "/api/sdo/read") {
+                const auto index = parseIndex(body);
+                const auto subindex = parseSubindex(body);
+                const auto type = parseObjectType(body);
+                const auto value = drive_.readObject(index, subindex, type);
+                return jsonResponse({{"ok", true},
+                                     {"index", hexValue(index, 4)},
+                                     {"subindex", subindex},
+                                     {"type", objectTypeName(type)},
+                                     {"value", value},
+                                     {"hex", objectValueHex(value, type)}});
+            }
+            if (request.path == "/api/sdo/write") {
+                const auto index = parseIndex(body);
+                const auto subindex = parseSubindex(body);
+                const auto type = parseObjectType(body);
+                const auto value = parseBodyValue(body);
+                drive_.writeObject(index, subindex, type, value);
+                return jsonResponse({{"ok", true},
+                                     {"index", hexValue(index, 4)},
+                                     {"subindex", subindex},
+                                     {"type", objectTypeName(type)},
+                                     {"value", value},
+                                     {"hex", objectValueHex(value, type)}});
+            }
+            if (request.path == "/api/move") {
+                return move(body);
+            }
+            return errorResponse(404, "unknown endpoint");
+        } catch (const json::exception& exception) {
+            return errorResponse(400, exception.what());
+        } catch (const std::exception& exception) {
+            return errorResponse(500, exception.what());
+        }
+    }
+
+private:
+    HttpResponse move(const json& body) {
+        const auto type = lower(body.value("type", "csp"));
+        const auto value = parseBodyValue(body);
+        const bool relative = body.value("relative", false);
+        if (type == "csp") {
+            const auto feedback = drive_.feedback();
+            const int64_t target =
+                relative ? static_cast<int64_t>(feedback.position) + value : value;
+            checkPositionStep(feedback.position, target, max_position_step_);
+            drive_.commandPosition(checkedI32(target, "target"));
+            return jsonResponse(
+                {{"ok", true}, {"action", relative ? "csp-relative" : "csp"}, {"target", target}});
+        }
+        if (type == "pp") {
+            drive_.moveToPosition(checkedI32(value, "target"), relative);
+            return jsonResponse(
+                {{"ok", true}, {"action", relative ? "pp-relative" : "pp"}, {"target", value}});
+        }
+        if (type == "velocity") {
+            drive_.commandVelocity(checkedI32(value, "velocity"));
+            return jsonResponse({{"ok", true}, {"action", "velocity"}, {"target", value}});
+        }
+        if (type == "torque") {
+            drive_.commandTorque(checkedI16(value, "torque"));
+            return jsonResponse({{"ok", true}, {"action", "torque"}, {"target", value}});
+        }
+        return errorResponse(400, "unknown move type: " + type);
+    }
+
+    stablecops::app::MotorDrive& drive_;
+    int32_t max_position_step_;
+};
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    stablecops::app::MotorConfig config;
+    config.monitor_on_boot = true;
+    config.operation_mode = stablecops::ds402::OperationMode::CyclicSynchronousPosition;
+
+    std::string host{"127.0.0.1"};
+    uint16_t port = 8765;
+
+    const auto print_usage = [] {
+        std::cerr << "usage: stablecops_commissiond [--host 127.0.0.1] [--port 8765] "
+                     "[--can can0] [--dcf dcf/master.dcf] "
+                     "[--summary generated/.../<name>.summary.json] "
+                     "[--master-node 127] [--node 1] [--mode csp|csv|cst|pp|pv|pt] "
+                     "[--profile-velocity n] [--profile-accel n] [--profile-decel n] "
+                     "[--torque-slope n] [--max-position-step counts] "
+                     "[--feedback-timeout ms] [--counts-per-rev n] "
+                     "[--sync-period-us 1000] [--enable] [--hold-position]\n";
+    };
+
+    try {
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg == "--host" && i + 1 < argc) {
+                host = argv[++i];
+            } else if (arg == "--port" && i + 1 < argc) {
+                const auto parsed = parseUnsignedText(argv[++i], 65535);
+                port = static_cast<uint16_t>(parsed);
+            } else if (arg == "--can" && i + 1 < argc) {
+                config.can_interface = argv[++i];
+            } else if (arg == "--dcf" && i + 1 < argc) {
+                config.master_dcf_path = argv[++i];
+            } else if (arg == "--summary" && i + 1 < argc) {
+                config.summary_path = argv[++i];
+            } else if (arg == "--master-node" && i + 1 < argc) {
+                config.master_node_id = static_cast<uint8_t>(parseUnsignedText(argv[++i], 127));
+            } else if (arg == "--node" && i + 1 < argc) {
+                config.node_id = static_cast<uint8_t>(parseUnsignedText(argv[++i], 127));
+            } else if (arg == "--mode" && i + 1 < argc) {
+                const auto mode = parseOperationMode(argv[++i]);
+                if (!mode) {
+                    print_usage();
+                    return EXIT_FAILURE;
+                }
+                config.operation_mode = mode;
+            } else if (arg == "--profile-velocity" && i + 1 < argc) {
+                config.profile_velocity = static_cast<uint32_t>(
+                    parseUnsignedText(argv[++i], std::numeric_limits<uint32_t>::max()));
+            } else if (arg == "--profile-accel" && i + 1 < argc) {
+                config.profile_acceleration = static_cast<uint32_t>(
+                    parseUnsignedText(argv[++i], std::numeric_limits<uint32_t>::max()));
+            } else if (arg == "--profile-decel" && i + 1 < argc) {
+                config.profile_deceleration = static_cast<uint32_t>(
+                    parseUnsignedText(argv[++i], std::numeric_limits<uint32_t>::max()));
+            } else if (arg == "--torque-slope" && i + 1 < argc) {
+                config.torque_slope = static_cast<uint32_t>(
+                    parseUnsignedText(argv[++i], std::numeric_limits<uint32_t>::max()));
+            } else if (arg == "--max-position-step" && i + 1 < argc) {
+                config.max_position_step = static_cast<int32_t>(
+                    parseUnsignedText(argv[++i], std::numeric_limits<int32_t>::max()));
+            } else if (arg == "--feedback-timeout" && i + 1 < argc) {
+                config.feedback_timeout = std::chrono::milliseconds{
+                    static_cast<long>(parseUnsignedText(argv[++i], 60000))};
+            } else if (arg == "--counts-per-rev" && i + 1 < argc) {
+                config.counts_per_rev = static_cast<uint32_t>(
+                    parseUnsignedText(argv[++i], std::numeric_limits<uint32_t>::max()));
+            } else if (arg == "--sync-period-us" && i + 1 < argc) {
+                config.sync_period_us = static_cast<uint32_t>(
+                    parseUnsignedText(argv[++i], std::numeric_limits<uint32_t>::max()));
+            } else if (arg == "--enable") {
+                config.enable_on_boot = true;
+            } else if (arg == "--hold-position") {
+                config.enable_on_boot = true;
+                config.hold_position_on_boot = true;
+            } else {
+                print_usage();
+                return EXIT_FAILURE;
+            }
+        }
+
+        std::signal(SIGINT, handleSignal);
+        std::signal(SIGTERM, handleSignal);
+
+        std::cout << "stableCOPS commissioning daemon\n"
+                  << "CAN interface: " << config.can_interface << '\n'
+                  << "Node ID: " << static_cast<int>(config.node_id) << '\n'
+                  << "Mode at boot: " << stablecops::ds402::toString(*config.operation_mode) << '\n'
+                  << "Monitor on boot: yes\n"
+                  << "Master DCF: " << config.master_dcf_path << '\n'
+                  << "PDO summary: " << config.summary_path << '\n';
+
+        stablecops::app::MotorDrive drive(config);
+        drive.start();
+
+        CommissioningApi api(drive, config.max_position_step);
+        HttpServer server(host, port, api);
+        server.run();
+        return EXIT_SUCCESS;
+    } catch (const std::exception& exception) {
+        std::cerr << "stablecops_commissiond: " << exception.what() << '\n';
+        return EXIT_FAILURE;
+    }
+}

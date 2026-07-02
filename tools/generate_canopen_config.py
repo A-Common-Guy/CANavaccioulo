@@ -250,9 +250,44 @@ def extract_pdo_mappings(
     return result
 
 
+def collect_nodes(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the chain's slave nodes as a list, accepting either form.
+
+    A profile may declare a single `node:` mapping (one drive) or a `nodes:`
+    list (a homogeneous chain that shares this EDS, differing only by node id /
+    name). Missing names/ids are filled in deterministically so a list of bare
+    `{node_id: N}` entries is enough.
+    """
+    if profile.get("nodes"):
+        raw_nodes = list(profile["nodes"])
+    elif "node" in profile:
+        raw_nodes = [profile["node"]]
+    else:
+        raise SystemExit("profile must define either 'node' or 'nodes'")
+
+    nodes: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    seen_names: set[str] = set()
+    for position, raw in enumerate(raw_nodes):
+        node = dict(raw)
+        node_id = int(node.get("node_id", position + 1))
+        name = node.get("name", f"node{node_id}")
+        if node_id in seen_ids:
+            raise SystemExit(f"duplicate node_id {node_id} in profile nodes")
+        if name in seen_names:
+            raise SystemExit(f"duplicate node name '{name}' in profile nodes")
+        seen_ids.add(node_id)
+        seen_names.add(name)
+        node["node_id"] = node_id
+        node["name"] = name
+        nodes.append(node)
+
+    return nodes
+
+
 def build_dcfgen_yaml(profile: dict[str, Any], normalized_eds: Path, root: Path) -> dict[str, Any]:
     master = profile["master"]
-    node = profile["node"]
+    nodes = collect_nodes(profile)
     no_strict = bool(profile.get("generation", {}).get("no_strict", False))
 
     config: dict[str, Any] = {
@@ -272,14 +307,19 @@ def build_dcfgen_yaml(profile: dict[str, Any], normalized_eds: Path, root: Path)
             "stop_all_nodes": master.get("stop_all_nodes", False),
             "boot_time": master.get("boot_time", 5000),
         },
-        node.get("name", "motor"): {
+    }
+
+    # One slave section per node on the chain. They all reference the same
+    # normalized EDS; dcfgen resolves the $NODEID-relative COB-IDs per node and
+    # builds the master's RPDO/TPDO image for every slave.
+    for node in nodes:
+        config[node["name"]] = {
             "dcf": relpath(normalized_eds, root),
             "node_id": node.get("node_id", 1),
             "mandatory": node.get("mandatory", True),
             "boot": node.get("boot", True),
             "reset_communication": node.get("reset_communication", True),
-        },
-    }
+        }
 
     if no_strict:
         config["options"]["no_strict"] = True
@@ -329,17 +369,20 @@ def main() -> int:
     dcfgen_yaml.write_text(yaml.safe_dump(dcfgen_config, sort_keys=False), encoding="utf-8")
 
     sections = parse_eds_sections(normalized_eds)
+    nodes = collect_nodes(profile)
+    node_ids = [node["node_id"] for node in nodes]
     summary = {
         "name": name,
         "vendor_eds": relpath(vendor_eds, root),
         "normalized_eds": relpath(normalized_eds, root),
         "master_dcf": relpath(dcf_dir / "master.dcf", root),
-        "node_id": profile["node"].get("node_id", 1),
+        "node_id": node_ids[0],
+        "node_ids": node_ids,
         "master_node_id": profile["master"].get("node_id", 127),
         "identity_policy": profile.get("identity_policy", "strict"),
         "pdo_policy": profile.get("pdo_policy", "vendor-default"),
         "mode_policy": profile.get("mode_policy", "vendor-default"),
-        "pdo_mappings": extract_pdo_mappings(sections, node_id=profile["node"].get("node_id", 1)),
+        "pdo_mappings": extract_pdo_mappings(sections, node_id=node_ids[0]),
     }
     summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 

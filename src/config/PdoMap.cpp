@@ -12,6 +12,15 @@ namespace {
 
 using nlohmann::json;
 
+constexpr uint32_t kCobIdBaseMask = 0x7FFU;
+constexpr uint32_t kCobIdNodeMask = 0x7FU;
+constexpr uint32_t kCobIdFlagMask = ~kCobIdBaseMask;
+
+struct CobIdRebase {
+    uint8_t from_node_id{0};
+    uint8_t to_node_id{0};
+};
+
 // summary.json stores object/PDO indices as hex strings ("0x1400") and COB-IDs
 // as plain integers. Accept either form defensively.
 uint32_t parseUnsigned(const json& value) {
@@ -68,6 +77,44 @@ std::vector<PdoChannel> parseChannels(const json& mappings, const char* key) {
     return channels;
 }
 
+uint8_t parseRepresentativeNodeId(const json& document) {
+    if (document.contains("node_id")) {
+        return static_cast<uint8_t>(parseUnsigned(document.at("node_id")));
+    }
+    if (document.contains("node_ids") && document.at("node_ids").is_array() &&
+        !document.at("node_ids").empty()) {
+        return static_cast<uint8_t>(parseUnsigned(document.at("node_ids").front()));
+    }
+    throw std::runtime_error("PDO map: summary has no representative node id");
+}
+
+uint32_t rebaseNodeRelativeCobId(uint32_t cob_id, CobIdRebase rebase) {
+    if (rebase.from_node_id == rebase.to_node_id) {
+        return cob_id;
+    }
+
+    const uint32_t base_cob_id = cob_id & kCobIdBaseMask;
+    if ((base_cob_id & kCobIdNodeMask) != rebase.from_node_id) {
+        return cob_id;
+    }
+
+    const uint32_t shifted_base =
+        base_cob_id - static_cast<uint32_t>(rebase.from_node_id) + rebase.to_node_id;
+    if (shifted_base > kCobIdBaseMask) {
+        throw std::runtime_error("PDO map: rebased COB-ID exceeds 11-bit range");
+    }
+
+    return (cob_id & kCobIdFlagMask) | shifted_base;
+}
+
+void rebaseNodeRelativeCobIds(PdoMap& map, CobIdRebase rebase) {
+    for (auto* channels : {&map.rpdo, &map.tpdo}) {
+        for (auto& channel : *channels) {
+            channel.cob_id = rebaseNodeRelativeCobId(channel.cob_id, rebase);
+        }
+    }
+}
+
 }  // namespace
 
 PdoMap loadPdoMapFromSummary(const std::string& summary_path) {
@@ -95,6 +142,61 @@ PdoMap loadPdoMapFromSummary(const std::string& summary_path) {
     map.rpdo = parseChannels(mappings, "rpdo");
     map.tpdo = parseChannels(mappings, "tpdo");
     return map;
+}
+
+PdoMap loadPdoMapFromSummary(const std::string& summary_path, uint8_t node_id) {
+    std::ifstream stream(summary_path);
+    if (!stream) {
+        throw std::runtime_error("PDO map: cannot open summary file '" +
+                                 summary_path + "'");
+    }
+
+    json document;
+    try {
+        stream >> document;
+    } catch (const json::exception& exception) {
+        throw std::runtime_error("PDO map: failed to parse '" + summary_path +
+                                 "': " + exception.what());
+    }
+
+    if (!document.contains("pdo_mappings")) {
+        throw std::runtime_error("PDO map: '" + summary_path +
+                                 "' has no 'pdo_mappings' section");
+    }
+
+    const auto representative_node_id = parseRepresentativeNodeId(document);
+    const auto& mappings = document.at("pdo_mappings");
+    PdoMap map;
+    map.rpdo = parseChannels(mappings, "rpdo");
+    map.tpdo = parseChannels(mappings, "tpdo");
+    rebaseNodeRelativeCobIds(map, CobIdRebase{representative_node_id, node_id});
+    return map;
+}
+
+std::vector<uint8_t> loadNodeIdsFromSummary(const std::string& summary_path) {
+    std::ifstream stream(summary_path);
+    if (!stream) {
+        throw std::runtime_error("PDO map: cannot open summary file '" +
+                                 summary_path + "'");
+    }
+
+    json document;
+    try {
+        stream >> document;
+    } catch (const json::exception& exception) {
+        throw std::runtime_error("PDO map: failed to parse '" + summary_path +
+                                 "': " + exception.what());
+    }
+
+    std::vector<uint8_t> node_ids;
+    if (document.contains("node_ids") && document.at("node_ids").is_array()) {
+        for (const auto& value : document.at("node_ids")) {
+            node_ids.push_back(static_cast<uint8_t>(parseUnsigned(value)));
+        }
+    } else if (document.contains("node_id")) {
+        node_ids.push_back(static_cast<uint8_t>(parseUnsigned(document.at("node_id"))));
+    }
+    return node_ids;
 }
 
 }  // namespace stablecops::config

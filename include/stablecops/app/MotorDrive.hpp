@@ -1,22 +1,31 @@
 #pragma once
 
-#include <atomic>
 #include <cstdint>
-#include <thread>
+#include <memory>
 
 #include "stablecops/app/MotorConfig.hpp"
 #include "stablecops/ds402/DriveController.hpp"
+#include "stablecops/lely/MotorDriver.hpp"
 
 namespace stablecops::app {
 
-class CanopenApplication;
+class Bus;
 
-// High-level, thread-safe handle to a single CANopen drive. It runs the Lely
-// event loop on a dedicated background thread and lets the application read
-// feedback and issue setpoints from its own thread without touching Lely
-// internals directly. Construction loads the profile and opens the bus; start()
-// boots the node and applies the configured boot behaviour (monitor / enable /
-// hold) and start cyclic SYNC.
+enum class ObjectDataType : uint8_t { U8, I8, U16, I16, U32, I32 };
+
+// High-level, thread-safe handle to a single CANopen drive.
+//
+// You only ever hold MotorDrive objects. Each one names a CAN interface and a
+// node id. Drives that name the same interface transparently share one hidden,
+// ref-counted bus (one Lely master, one event-loop thread, one SYNC); different
+// interfaces get independent buses, each with its own loop thread - so several
+// chains are just MotorDrives constructed with different interface names.
+//
+// Lifecycle is static: construct all drives for a chain, then call start(). The
+// first start() on any drive of a chain boots the whole chain once; start() on
+// siblings is then a no-op. The last MotorDrive released on an interface tears
+// that bus down (graceful stop + join). Constructing a new drive for an
+// interface that has already started throws.
 class MotorDrive {
 public:
     explicit MotorDrive(MotorConfig config);
@@ -25,23 +34,58 @@ public:
     MotorDrive(const MotorDrive&) = delete;
     MotorDrive& operator=(const MotorDrive&) = delete;
 
-    // Launch the event-loop thread and reset the master (which boots the node).
-    // The Lely application is constructed (and later destroyed) on that thread,
-    // because a FiberDriver must live on the thread that runs its tasks. Blocks
-    // until the application is constructed; rethrows any construction error
-    // (e.g. bad profile path or CAN open failure). Idempotent while running.
+    // Boot this drive's chain. The shared bus launches its loop thread, applies
+    // any real-time tuning, constructs the Lely application for all registered
+    // nodes, and resets the master. Blocks until the application is constructed;
+    // rethrows any construction error (e.g. bad profile path or CAN open
+    // failure). Idempotent and shared across all drives on the interface.
     void start();
 
-    // Request a graceful stop (ramp down / de-energise if enabled) and join the
-    // loop thread. Idempotent and also called by the destructor.
+    // Request a graceful stop of this drive (ramp down / de-energise if
+    // enabled). Does not tear down the shared bus (siblings keep running); the
+    // bus is torn down when the last MotorDrive on the interface is destroyed.
     void stop();
 
     bool running() const;
 
-    // Latest feedback snapshot, safe to call from any thread. feedbackLive()
-    // becomes true once the first cyclic TPDO has been received and decoded.
+    // Latest feedback snapshot, safe to call from any thread. feedbackLive() is
+    // true only while fresh cyclic feedback keeps arriving; it goes false if the
+    // drive stops talking (the same staleness that trips the safety watchdog).
     ds402::Feedback feedback() const;
     bool feedbackLive() const;
+
+    // Latest output-shaft angle, converted from feedback().position using the
+    // configured counts_per_rev. Convenience over the raw count.
+    double positionDegrees() const;
+    double positionRadians() const;
+
+    // Drive status, derived from the latest feedback. enabled() requires live
+    // feedback so a stale "operation enabled" snapshot never reads as enabled.
+    bool enabled() const;
+    bool faulted() const;
+    uint16_t errorCode() const;
+
+    // Clear a latched fault and recover to the configured operating state
+    // (re-enabled if the drive was meant to run, otherwise safely disabled).
+    // Applied on the loop thread; observe the result via faulted()/enabled().
+    void resetFault();
+
+    // Walk the CiA402 state machine to Operation Enabled at runtime using the
+    // same safe ladder as boot-time enable. `hold_position` primes the current
+    // CSP target before enabling, so a position-mode drive does not step.
+    void enableOperation(bool hold_position = true);
+
+    // Request a CiA402 operation mode change (0x6060). The drive may reject this
+    // over SDO depending on its state/firmware; errors are surfaced to the
+    // caller instead of silently falling back.
+    void setOperationMode(ds402::OperationMode mode);
+
+    // Typed CANopen object access routed to the Lely loop thread. Reads of
+    // PDO-mapped feedback may return the cached TPDO value; writes to mapped
+    // command objects are staged into the cyclic command image. Other objects use
+    // SDO through MotorDriver's ObjectAccess implementation.
+    int64_t readObject(uint16_t index, uint8_t subindex, ObjectDataType type) const;
+    void writeObject(uint16_t index, uint8_t subindex, ObjectDataType type, int64_t value);
 
     // Runtime cyclic setpoints, applied on the loop thread for the next SYNC.
     // They take effect only when the drive is enabled in the matching cyclic
@@ -50,13 +94,22 @@ public:
     void commandVelocity(int32_t units);
     void commandTorque(int16_t units);
 
+    // Profile Position move (drive runs its own trajectory using the configured
+    // profile velocity/accel/decel). Absolute by default; relative adds to the
+    // current position. Effective only when enabled in Profile Position mode.
+    void moveToPosition(int32_t counts, bool relative = false);
+
+    // Measured cyclic cadence of this drive's bus (shared by all drives on the
+    // interface): interval min/max/mean and worst-case jitter vs the nominal
+    // SYNC period. Use it to verify achieved latency/jitter.
+    stablecops::lely::CyclicStats cyclicStats() const;
+
 private:
     MotorConfig config_;
-    // Owned by the loop thread; exposed to other threads as an atomic pointer
-    // that is non-null only while the loop is running.
-    std::atomic<CanopenApplication*> app_{nullptr};
-    std::thread loop_thread_;
-    std::atomic<bool> running_{false};
+    uint8_t node_id_;
+    // The shared bus for config_.can_interface. Several MotorDrives on the same
+    // interface hold the same Bus; it lives until the last one is released.
+    std::shared_ptr<Bus> bus_;
 };
 
 }  // namespace stablecops::app
