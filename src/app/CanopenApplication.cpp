@@ -136,7 +136,7 @@ public:
             --stops_remaining_;
         }
         if (stops_remaining_ == 0) {
-            resetAllNodesThenExit();
+            finishShutdown(/*reset_nodes=*/false);
         }
     }
 
@@ -146,25 +146,33 @@ public:
             executor_, [this](int /*overrun*/, std::error_code /*ec*/) {
                 if (!shutdown_complete_ &&
                     std::chrono::steady_clock::now() >= shutdown_deadline_) {
-                    resetAllNodesThenExit();
+                    finishShutdown(/*reset_nodes=*/true);
                 } else if (!shutdown_complete_) {
                     scheduleShutdownCheck();
                 }
             });
     }
 
-    void resetAllNodesThenExit() {
+    void finishShutdown(bool reset_nodes) {
         if (shutdown_complete_) {
             return;
         }
         shutdown_complete_ = true;
-        // Reset each node as a guaranteed final de-energise: it forces the drive
-        // back through initialisation, dropping the power stage regardless of
-        // whether the DS402 disable-voltage sequence completed. Give the frames
-        // a moment to reach the drives before tearing the master down.
+
+        if (!reset_nodes) {
+            context_.shutdown();
+            loop_.stop();
+            return;
+        }
+
+        // Fallback only: if a drive never confirms de-energising, reset each
+        // node as a final power-stage drop. Normal shutdown follows the vendor
+        // SDK pattern and exits quietly after graceful stops.
         for (uint8_t node_id : node_ids_) {
             master_.Command(::lely::canopen::NmtCommand::RESET_NODE, node_id);
         }
+
+        // Give reset frames time to leave the CAN channel before teardown.
         shutdown_timer_.settime(std::chrono::milliseconds{50});
         shutdown_timer_.submit_wait(
             executor_, [this](int /*overrun*/, std::error_code /*ec*/) {

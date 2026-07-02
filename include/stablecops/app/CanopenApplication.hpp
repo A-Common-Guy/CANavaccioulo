@@ -38,9 +38,10 @@ public:
     void run();
     void stop();
 
-    // Begin a coordinated shutdown of the whole bus: graceful-stop every drive,
-    // then reset all nodes and stop the loop once they are de-energised (or a
-    // bounded grace period elapses). Safe to call from the loop thread.
+    // Begin a coordinated shutdown of the whole bus: graceful-stop every drive
+    // and stop the loop once they are de-energised. If a bounded grace period
+    // elapses first, reset nodes as a final fallback before teardown. Safe to
+    // call from the loop thread.
     void requestShutdown();
 
     // Schedule a function to run on the event-loop thread. Thread-safe; this is
