@@ -1,0 +1,11 @@
+@PACKAGE_INIT@
+
+# stableCOPS is a shared library. Its dependencies (liblely-coapp, pthreads) are
+# PRIVATE implementation details linked into libstablecops.so, so a consumer does
+# not need to find them to compile or link against the public MotorDrive API.
+# liblely-coapp must still be installed on the target at runtime, since the
+# shared object records it as a NEEDED dependency.
+
+include("${CMAKE_CURRENT_LIST_DIR}/stableCOPSTargets.cmake")
+
+check_required_components(stableCOPS)

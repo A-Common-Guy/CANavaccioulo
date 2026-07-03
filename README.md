@@ -22,6 +22,43 @@ cmake --preset default
 cmake --build --preset default
 ```
 
+## Install & integrate as a shared library
+
+The build produces a versioned shared library `libstablecops.so` plus a CMake
+package, so another project can consume it without knowing anything about the
+private dependencies (Lely, pthreads):
+
+```bash
+cmake --preset default
+cmake --build --preset default
+cmake --install build --prefix /your/prefix     # sudo for a system prefix
+```
+
+This installs the headers, `libstablecops.so.<version>` (SONAME
+`libstablecops.so.0`), the `stableCOPS` CMake package, and the sample generated
+artifacts (`share/stablecops/{dcf,generated,config}`). A consumer then only
+needs:
+
+```cmake
+find_package(stableCOPS REQUIRED)
+target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
+```
+
+```cpp
+#include "stablecops/app/MotorConfig.hpp"
+#include "stablecops/app/MotorDrive.hpp"
+// No Lely headers, no pkg-config: the public MotorDrive API is dependency-clean.
+```
+
+Requirements on the target: `liblely-coapp` must be installed (the shared object
+records it as a runtime `NEEDED` dependency), SocketCAN must be up (`canup.sh`),
+and the process needs CAN privileges (root or `CAP_NET_ADMIN`).
+
+Runtime data: the library loads the generated master DCF and PDO summary **by
+path** at boot. Point `MotorConfig::master_dcf_path` and `summary_path` at your
+own copies (e.g. the installed `share/stablecops/...` artifacts, or ones you
+regenerate for your motor); they are data, not compiled in.
+
 ## Generate CANopen Artifacts
 
 ```bash

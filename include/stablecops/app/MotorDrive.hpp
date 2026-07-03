@@ -5,7 +5,7 @@
 
 #include "stablecops/app/MotorConfig.hpp"
 #include "stablecops/ds402/DriveController.hpp"
-#include "stablecops/lely/MotorDriver.hpp"
+#include "stablecops/lely/CyclicStats.hpp"
 
 namespace stablecops::app {
 

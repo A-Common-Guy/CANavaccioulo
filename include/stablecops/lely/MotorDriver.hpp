@@ -15,6 +15,7 @@
 #include "stablecops/config/PdoMap.hpp"
 #include "stablecops/ds402/DriveController.hpp"
 #include "stablecops/ds402/ObjectAccess.hpp"
+#include "stablecops/lely/CyclicStats.hpp"
 
 namespace stablecops::lely {
 
@@ -41,19 +42,6 @@ struct BootActionConfig {
     // Nominal cyclic period in microseconds, used as the reference for jitter
     // telemetry (should match the master's SYNC period from the DCF).
     uint32_t sync_period_us{1000};
-};
-
-// Measured cadence of the cyclic SYNC, accumulated on the loop thread and
-// published for other threads. Intervals are between consecutive OnSync calls;
-// jitter is the worst absolute deviation from the nominal period. All times in
-// microseconds. cycles is the number of measured intervals.
-struct CyclicStats {
-    uint64_t cycles{0};
-    double last_us{0.0};
-    double min_us{0.0};
-    double max_us{0.0};
-    double mean_us{0.0};
-    double max_jitter_us{0.0};
 };
 
 // CANopen integer type of a PDO-mapped object, derived from its bit length and

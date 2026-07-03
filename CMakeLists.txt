@@ -1,148 +1,143 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(stableCOPS LANGUAGES CXX)
+project(stableCOPS VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LELY_COAPP REQUIRED IMPORTED_TARGET liblely-coapp)
+message(STATUS "Lely CANopen dependency found through pkg-config: liblely-coapp")
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-add_library(stablecops_lely_project_options INTERFACE)
-target_compile_features(stablecops_lely_project_options INTERFACE cxx_std_17)
-target_compile_options(stablecops_lely_project_options INTERFACE
-    -Wall
-    -Wextra
-    -Wpedantic
-)
-
-target_link_libraries(stablecops_lely_project_options INTERFACE PkgConfig::LELY_COAPP)
-message(STATUS "Lely CANopen dependency found through pkg-config: liblely-coapp")
-
-add_library(stablecops_log
+# ---------------------------------------------------------------------------
+# The library: one shared object that consumers link against.
+#
+# All sources live in a single target so the install/export is trivial and so
+# the Lely dependency stays a private implementation detail. The public headers
+# (MotorDrive.hpp and the ds402/app value types) do not include any Lely header,
+# so consumers need neither the Lely headers nor an explicit Lely link.
+# ---------------------------------------------------------------------------
+add_library(stablecops SHARED
     src/log/Log.cpp
-)
-target_include_directories(stablecops_log PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_link_libraries(stablecops_log PUBLIC stablecops_lely_project_options)
-
-add_library(stablecops_ds402
     src/ds402/DriveController.cpp
     src/ds402/State.cpp
-)
-target_include_directories(stablecops_ds402 PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_link_libraries(stablecops_ds402 PUBLIC stablecops_lely_project_options)
-
-add_library(stablecops_config
     src/config/PdoMap.cpp
-)
-target_include_directories(stablecops_config
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-)
-target_link_libraries(stablecops_config PUBLIC stablecops_lely_project_options)
-
-add_library(stablecops_runtime
     src/app/CanopenApplication.cpp
     src/app/Bus.cpp
     src/app/MotorDrive.cpp
     src/app/RealtimeScheduling.cpp
     src/lely/MotorDriver.cpp
 )
-target_include_directories(stablecops_runtime PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_link_libraries(stablecops_runtime PUBLIC stablecops_log stablecops_ds402 stablecops_config Threads::Threads)
+add_library(stableCOPS::stablecops ALIAS stablecops)
 
-add_executable(stablecops_master
-    src/tools/stablecops_master.cpp
+target_include_directories(stablecops
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
-target_link_libraries(stablecops_master PRIVATE stablecops_runtime)
 
-add_executable(stablecops_commissiond
-    src/tools/stablecops_commissiond.cpp
-)
-target_include_directories(stablecops_commissiond PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-)
-target_link_libraries(stablecops_commissiond PRIVATE stablecops_runtime)
+target_compile_features(stablecops PUBLIC cxx_std_17)
+target_compile_options(stablecops PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(pdo_feedback_monitor
-    examples/pdo_feedback_monitor.cpp
-)
-set_target_properties(pdo_feedback_monitor PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
-)
-target_link_libraries(pdo_feedback_monitor PRIVATE stablecops_runtime)
+# PRIVATE: because the library is shared and its public headers don't expose
+# Lely/pthread types, these are not propagated to consumers. libstablecops.so
+# records liblely-coapp as a runtime dependency (DT_NEEDED); it must be present
+# on the target at load time.
+target_link_libraries(stablecops PRIVATE PkgConfig::LELY_COAPP Threads::Threads)
 
-add_executable(enable_and_hold
-    examples/enable_and_hold.cpp
+set_target_properties(stablecops PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
 )
-set_target_properties(enable_and_hold PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
-)
-target_link_libraries(enable_and_hold PRIVATE stablecops_runtime)
 
-add_executable(csp_position
-    examples/csp_position.cpp
-)
-set_target_properties(csp_position PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
-)
-target_link_libraries(csp_position PRIVATE stablecops_runtime)
+# ---------------------------------------------------------------------------
+# In-tree tools and examples.
+# ---------------------------------------------------------------------------
+add_executable(stablecops_master src/tools/stablecops_master.cpp)
+# The master tool uses the advanced CanopenApplication API, whose header still
+# exposes Lely types, so it needs the Lely include path directly (unlike the
+# MotorDrive-based examples below).
+target_link_libraries(stablecops_master PRIVATE stablecops PkgConfig::LELY_COAPP)
 
-add_executable(csv_velocity
-    examples/csv_velocity.cpp
-)
-set_target_properties(csv_velocity PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
-)
-target_link_libraries(csv_velocity PRIVATE stablecops_runtime)
+add_executable(stablecops_commissiond src/tools/stablecops_commissiond.cpp)
+target_include_directories(stablecops_commissiond PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_link_libraries(stablecops_commissiond PRIVATE stablecops)
 
-add_executable(cst_torque
-    examples/cst_torque.cpp
+# Every example uses only the Lely-free MotorDrive API.
+set(STABLECOPS_EXAMPLES
+    pdo_feedback_monitor
+    enable_and_hold
+    csp_position
+    csv_velocity
+    cst_torque
+    pp_move
+    pv_velocity
+    pt_torque
+    multi_drive
 )
-set_target_properties(cst_torque PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
-)
-target_link_libraries(cst_torque PRIVATE stablecops_runtime)
+foreach(example ${STABLECOPS_EXAMPLES})
+    add_executable(${example} examples/${example}.cpp)
+    set_target_properties(${example} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+    )
+    target_link_libraries(${example} PRIVATE stablecops)
+endforeach()
 
-add_executable(pp_move
-    examples/pp_move.cpp
+# ---------------------------------------------------------------------------
+# Install + CMake package export, so a consumer can:
+#   find_package(stableCOPS REQUIRED)
+#   target_link_libraries(app PRIVATE stableCOPS::stablecops)
+# ---------------------------------------------------------------------------
+install(TARGETS stablecops
+    EXPORT stableCOPSTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-set_target_properties(pp_move PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-target_link_libraries(pp_move PRIVATE stablecops_runtime)
 
-add_executable(pv_velocity
-    examples/pv_velocity.cpp
+install(EXPORT stableCOPSTargets
+    FILE stableCOPSTargets.cmake
+    NAMESPACE stableCOPS::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/stableCOPS
 )
-set_target_properties(pv_velocity PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
-)
-target_link_libraries(pv_velocity PRIVATE stablecops_runtime)
 
-add_executable(pt_torque
-    examples/pt_torque.cpp
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/stableCOPSConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/stableCOPSConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/stableCOPS
 )
-set_target_properties(pt_torque PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/stableCOPSConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
 )
-target_link_libraries(pt_torque PRIVATE stablecops_runtime)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/stableCOPSConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/stableCOPSConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/stableCOPS
+)
 
-add_executable(multi_drive
-    examples/multi_drive.cpp
+# Runtime data the library loads by path at boot (the generated master DCF, the
+# PDO summary the cyclic layout is built from, and the motor profiles/EDS).
+# Installed as sample data under the datadir; integrators point MotorConfig's
+# master_dcf_path / summary_path at their own copies.
+install(DIRECTORY
+        ${CMAKE_CURRENT_SOURCE_DIR}/dcf
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated
+        ${CMAKE_CURRENT_SOURCE_DIR}/config
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/stablecops
 )
-set_target_properties(multi_drive PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
-)
-target_link_libraries(multi_drive PRIVATE stablecops_runtime)
