@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "stablecops/ds402/ObjectDictionary.hpp"
+#include "stablecops/log/Log.hpp"
 
 namespace stablecops::lely {
 
@@ -241,14 +242,16 @@ bool MotorDriver::feedbackStale(std::chrono::steady_clock::time_point now) const
 void MotorDriver::logFaultTransition() {
     const bool in_fault = feedback_.state == ds402::State::Fault ||
                           feedback_.state == ds402::State::FaultReactionActive ||
-                          feedback_.error_code != 0;
+                          feedback_.error_code != 0 || feedback_.emergency_error_code != 0;
     if (in_fault && !fault_active_logged_) {
-        std::cerr << "drive FAULT: state=" << ds402::toString(feedback_.state) << " statusword=";
-        writeHex(std::cerr, feedback_.statusword, 4) << " error_code=";
-        writeHex(std::cerr, feedback_.error_code, 4) << '\n';
+        stablecops::log::err() << "drive FAULT: state=" << ds402::toString(feedback_.state) << " statusword=";
+        writeHex(stablecops::log::err(), feedback_.statusword, 4) << " error_code=";
+        writeHex(stablecops::log::err(), feedback_.error_code, 4) << " emcy=";
+        writeHex(stablecops::log::err(), feedback_.emergency_error_code, 4) << " error_register=";
+        writeHex(stablecops::log::err(), feedback_.error_register, 2) << '\n';
         fault_active_logged_ = true;
     } else if (!in_fault && fault_active_logged_) {
-        std::cout << "drive fault cleared (state=" << ds402::toString(feedback_.state) << ")\n";
+        stablecops::log::out() << "drive fault cleared (state=" << ds402::toString(feedback_.state) << ")\n";
         fault_active_logged_ = false;
     }
 }
@@ -340,20 +343,35 @@ bool MotorDriver::isFeedbackObject(uint16_t index) const {
     }
 }
 
+bool MotorDriver::feedbackMapped(uint16_t index) const {
+    return std::any_of(feedback_objects_.begin(), feedback_objects_.end(),
+                       [index](const CyclicObject& object) { return object.index == index; });
+}
+
+// Reads of objects that ride in an active TxPDO are served from the cached
+// snapshot refreshed every SYNC (no bus round trip); everything else, and any
+// object not actually mapped, falls back to a blocking SDO read.
 uint8_t MotorDriver::readU8(uint16_t index, uint8_t subindex) {
-    if (index == ds402::od::modes_of_operation_display && rpdo_seen_) {
+    if (rpdo_seen_ && index == ds402::od::modes_of_operation_display &&
+        feedbackMapped(index)) {
         return static_cast<uint8_t>(static_cast<int8_t>(feedback_.mode));
     }
     return Wait(AsyncRead<uint8_t>(index, subindex));
 }
 
 uint16_t MotorDriver::readU16(uint16_t index, uint8_t subindex) {
-    if (rpdo_seen_) {
+    if (rpdo_seen_ && feedbackMapped(index)) {
         if (index == ds402::od::statusword) {
             return feedback_.statusword;
         }
         if (index == ds402::od::torque_actual_value) {
             return static_cast<uint16_t>(feedback_.torque);
+        }
+        // error_code (0x603F) is refreshed from the TPDO by decodeFeedbackObject
+        // when the profile maps it, so serve it from the snapshot too instead of
+        // an SDO read on every feedback poll.
+        if (index == ds402::od::error_code) {
+            return feedback_.error_code;
         }
     }
     return Wait(AsyncRead<uint16_t>(index, subindex));
@@ -364,7 +382,7 @@ uint32_t MotorDriver::readU32(uint16_t index, uint8_t subindex) {
 }
 
 int32_t MotorDriver::readI32(uint16_t index, uint8_t subindex) {
-    if (rpdo_seen_) {
+    if (rpdo_seen_ && feedbackMapped(index)) {
         if (index == ds402::od::position_actual_value) {
             return feedback_.position;
         }
@@ -427,12 +445,12 @@ void MotorDriver::writeI32(uint16_t index, uint8_t subindex, int32_t value) {
 void MotorDriver::OnBoot(::lely::canopen::NmtState state, char error,
                          const std::string& reason) noexcept {
     if (error != 0) {
-        std::cerr << "node " << static_cast<int>(id()) << " boot failed: " << reason << " ("
+        stablecops::log::err() << "node " << static_cast<int>(id()) << " boot failed: " << reason << " ("
                   << error << ")\n";
         return;
     }
 
-    std::cout << "node " << static_cast<int>(id()) << " booted, NMT state "
+    stablecops::log::out() << "node " << static_cast<int>(id()) << " booted, NMT state "
               << static_cast<int>(state) << '\n';
 
     if (boot_actions_.inspect) {
@@ -462,7 +480,7 @@ void MotorDriver::OnConfig(std::function<void(std::error_code)> result) noexcept
                 ec = configureProfileParameters();
             }
             if (ec) {
-                std::cerr << "node " << static_cast<int>(id())
+                stablecops::log::err() << "node " << static_cast<int>(id())
                           << " configuration failed: " << ec.message() << '\n';
             }
         }
@@ -487,11 +505,11 @@ std::error_code MotorDriver::selectOperationMode() noexcept {
                     static_cast<int8_t>(mode)),
          ec);
     if (ec) {
-        std::cerr << "  SDO write to modes of operation (0x6060:00) failed: " << ec.message()
+        stablecops::log::err() << "  SDO write to modes of operation (0x6060:00) failed: " << ec.message()
                   << '\n';
         return ec;
     }
-    std::cout << "  operation mode set to " << ds402::toString(mode)
+    stablecops::log::out() << "  operation mode set to " << ds402::toString(mode)
               << " (0x6060=" << static_cast<int>(static_cast<int8_t>(mode)) << ")\n";
     return {};
 }
@@ -509,11 +527,11 @@ std::error_code MotorDriver::configureProfileParameters() noexcept {
         }
         Wait(AsyncWrite(index, ds402::od::default_subindex, *value), ec);
         if (ec) {
-            std::cerr << "  SDO write to " << what << " (";
-            writeHex(std::cerr, index, 4) << ":00) failed: " << ec.message() << '\n';
+            stablecops::log::err() << "  SDO write to " << what << " (";
+            writeHex(stablecops::log::err(), index, 4) << ":00) failed: " << ec.message() << '\n';
             return false;
         }
-        std::cout << "  " << what << " set to " << *value << '\n';
+        stablecops::log::out() << "  " << what << " set to " << *value << '\n';
         return true;
     };
 
@@ -535,7 +553,7 @@ std::error_code MotorDriver::configureProfileParameters() noexcept {
 }
 
 std::error_code MotorDriver::configurePdos() noexcept {
-    std::cout << "node " << static_cast<int>(id())
+    stablecops::log::out() << "node " << static_cast<int>(id())
               << ": configuring drive PDOs for cyclic synchronous operation\n";
 
     std::error_code ec;
@@ -543,8 +561,8 @@ std::error_code MotorDriver::configurePdos() noexcept {
                               const char* what) -> bool {
         Wait(AsyncWrite(index, subindex, value), ec);
         if (ec) {
-            std::cerr << "  SDO write to " << what << " (";
-            writeHex(std::cerr, index, 4)
+            stablecops::log::err() << "  SDO write to " << what << " (";
+            writeHex(stablecops::log::err(), index, 4)
                 << ':' << std::setw(2) << std::setfill('0') << std::uppercase << std::hex
                 << static_cast<int>(subindex) << std::dec << ") failed: " << ec.message() << '\n';
         }
@@ -593,7 +611,7 @@ std::error_code MotorDriver::configurePdos() noexcept {
         if (!download(pdo.comm_index, 0x01, base_cob_id, "PDO COB-ID (enable)")) {
             return false;
         }
-        std::cout << "node " << static_cast<int>(id()) << ": " << role << " 0x" << std::hex
+        stablecops::log::out() << "node " << static_cast<int>(id()) << ": " << role << " 0x" << std::hex
                   << pdo.comm_index << std::dec << " COB-ID 0x" << std::hex << base_cob_id
                   << std::dec << " set to transmission type "
                   << static_cast<int>(pdo.transmission_type) << ", " << pdo.entries.size()
@@ -616,7 +634,7 @@ std::error_code MotorDriver::configurePdos() noexcept {
                           "PDO COB-ID (disable)")) {
                 return ec;
             }
-            std::cout << "node " << static_cast<int>(id()) << ": RxPDO 0x" << std::hex
+            stablecops::log::out() << "node " << static_cast<int>(id()) << ": RxPDO 0x" << std::hex
                       << pdo.comm_index << std::dec << " disabled (unused)\n";
         }
     }
@@ -652,6 +670,10 @@ void MotorDriver::OnSync(uint8_t /*counter*/, const time_point& /*time*/) noexce
     // period). Cheap and allocation-free; published with the feedback snapshot.
     updateCyclicStats(now);
 
+    // Keep the node-liveness flag on the cached image current every cycle so the
+    // published snapshot always reflects the latest heartbeat/node-guarding view.
+    feedback_.node_alive = !node_loss_;
+
     // Refresh the cached feedback from every object the drive maps into its
     // TPDOs. These reads never hit the bus; they snapshot the last received PDO.
     // The set of objects is whatever the profile mapped, not a fixed list.
@@ -669,8 +691,10 @@ void MotorDriver::OnSync(uint8_t /*counter*/, const time_point& /*time*/) noexce
 
     // Liveness reflects staleness rather than latching: it is true only while
     // fresh feedback keeps arriving, so readers (and the facade) can trust it.
+    // A node the heartbeat/node-guarding channel has lost is never live, even if
+    // stale TPDOs would otherwise still be within the window.
     const bool stale = feedbackStale(now);
-    feedback_live_.store(rpdo_seen_ && !stale, std::memory_order_release);
+    feedback_live_.store(rpdo_seen_ && !stale && !node_loss_, std::memory_order_release);
 
     // Safety watchdog: if the drive stops talking while energised, drop the
     // power stage. requestGracefulStop is one-shot, so this logs/acts once.
@@ -679,7 +703,7 @@ void MotorDriver::OnSync(uint8_t /*counter*/, const time_point& /*time*/) noexce
                                homing_phase_ != ds402::HomingPhase::Failed;
     if (cyclic_active_ && stop_phase_ == StopPhase::None && stale) {
         if (homing_active) {
-            std::cerr << "feedback watchdog: no drive feedback for >"
+            stablecops::log::err() << "feedback watchdog: no drive feedback for >"
                       << boot_actions_.feedback_timeout.count()
                       << " ms during homing; commanding zero velocity\n";
             failHoming("feedback watchdog expired during homing");
@@ -688,7 +712,7 @@ void MotorDriver::OnSync(uint8_t /*counter*/, const time_point& /*time*/) noexce
                 setCommandValue(ds402::od::target_velocity, 0);
             }
         } else {
-            std::cerr << "feedback watchdog: no drive feedback for >"
+            stablecops::log::err() << "feedback watchdog: no drive feedback for >"
                       << boot_actions_.feedback_timeout.count() << " ms; de-energising\n";
             requestGracefulStop();
         }
@@ -728,17 +752,90 @@ void MotorDriver::OnSync(uint8_t /*counter*/, const time_point& /*time*/) noexce
     }
 }
 
+void MotorDriver::OnEmcy(uint16_t eec, uint8_t er, uint8_t msef[5]) noexcept {
+    // The drive announces faults on the dedicated emergency channel (COB
+    // 0x080+id) as well as through statusword/0x603F in the TPDO. Fold the EMCY
+    // into the cached feedback so an internally-latched fault is visible even
+    // when the cyclic stream keeps flowing, and publish it for other threads.
+    feedback_.emergency_error_code = eec;
+    feedback_.error_register = er;
+    for (std::size_t i = 0; i < feedback_.vendor_error.size(); ++i) {
+        feedback_.vendor_error[i] = msef[i];
+    }
+
+    if (eec != 0) {
+        stablecops::log::err() << "node " << static_cast<int>(id()) << " EMCY: error_code=";
+        writeHex(stablecops::log::err(), eec, 4) << " error_register=";
+        writeHex(stablecops::log::err(), er, 2) << " vendor=";
+        for (std::size_t i = 0; i < feedback_.vendor_error.size(); ++i) {
+            writeHex(stablecops::log::err(), feedback_.vendor_error[i], 2)
+                << (i + 1 < feedback_.vendor_error.size() ? " " : "\n");
+        }
+    } else {
+        // EMCY with error code 0x0000 is the standard "error reset / no error"
+        // notification; the drive has cleared its emergency state.
+        stablecops::log::out() << "node " << static_cast<int>(id()) << " EMCY cleared (no error)\n";
+    }
+
+    publishFeedback();
+}
+
+void MotorDriver::OnState(::lely::canopen::NmtState state) noexcept {
+    // NMT state change (or boot-up) of the remote node, detected by the
+    // heartbeat protocol. Purely informational here; node loss is handled by
+    // OnHeartbeat/OnNodeGuarding.
+    stablecops::log::out() << "node " << static_cast<int>(id()) << " NMT state -> "
+              << static_cast<int>(state) << '\n';
+}
+
+void MotorDriver::OnHeartbeat(bool occurred) noexcept {
+    // occurred == true: the master's consumer heartbeat timed out (node lost);
+    // occurred == false: heartbeat resumed.
+    handleNodeLoss("heartbeat", occurred);
+}
+
+void MotorDriver::OnNodeGuarding(bool occurred) noexcept {
+    handleNodeLoss("node guarding", occurred);
+}
+
+void MotorDriver::handleNodeLoss(const char* channel, bool lost) {
+    if (lost == node_loss_) {
+        return;  // already in this state; react once per transition
+    }
+    node_loss_ = lost;
+    feedback_.node_alive = !lost;
+
+    if (lost) {
+        stablecops::log::err() << "node " << static_cast<int>(id()) << ' ' << channel
+                  << " lost; the node stopped its error-control traffic\n";
+        // The node is gone on an independent channel, so any cyclic feedback is
+        // no longer trustworthy regardless of TPDO cadence.
+        feedback_live_.store(false, std::memory_order_release);
+        // De-energise if we were driving it; harmless (and a no-op) otherwise.
+        if (cyclic_active_ && stop_phase_ == StopPhase::None) {
+            stablecops::log::err() << "node " << static_cast<int>(id())
+                      << ": de-energising after node loss\n";
+            requestGracefulStop();
+        }
+    } else {
+        stablecops::log::out() << "node " << static_cast<int>(id()) << ' ' << channel
+                  << " restored\n";
+    }
+
+    publishFeedback();
+}
+
 void MotorDriver::inspectNode() noexcept {
-    std::cout << "inspecting CANopen/DS402 objects\n";
+    stablecops::log::out() << "inspecting CANopen/DS402 objects\n";
 
     auto read_u8 = [this](uint16_t index, uint8_t subindex, const char* name) {
         std::error_code ec;
         const auto value = Wait(AsyncRead<uint8_t>(index, subindex), ec);
-        writeObjectName(std::cout, name, index, subindex);
+        writeObjectName(stablecops::log::out(), name, index, subindex);
         if (ec) {
-            std::cout << "FAILED: " << ec.message() << '\n';
+            stablecops::log::out() << "FAILED: " << ec.message() << '\n';
         } else {
-            writeHex(std::cout, value, 2) << " (" << static_cast<int>(value) << ")\n";
+            writeHex(stablecops::log::out(), value, 2) << " (" << static_cast<int>(value) << ")\n";
         }
         return std::pair<uint8_t, bool>{value, !ec};
     };
@@ -746,11 +843,11 @@ void MotorDriver::inspectNode() noexcept {
     auto read_u16 = [this](uint16_t index, uint8_t subindex, const char* name) {
         std::error_code ec;
         const auto value = Wait(AsyncRead<uint16_t>(index, subindex), ec);
-        writeObjectName(std::cout, name, index, subindex);
+        writeObjectName(stablecops::log::out(), name, index, subindex);
         if (ec) {
-            std::cout << "FAILED: " << ec.message() << '\n';
+            stablecops::log::out() << "FAILED: " << ec.message() << '\n';
         } else {
-            writeHex(std::cout, value, 4) << " (" << value << ")\n";
+            writeHex(stablecops::log::out(), value, 4) << " (" << value << ")\n";
         }
         return std::pair<uint16_t, bool>{value, !ec};
     };
@@ -758,11 +855,11 @@ void MotorDriver::inspectNode() noexcept {
     auto read_u32 = [this](uint16_t index, uint8_t subindex, const char* name) {
         std::error_code ec;
         const auto value = Wait(AsyncRead<uint32_t>(index, subindex), ec);
-        writeObjectName(std::cout, name, index, subindex);
+        writeObjectName(stablecops::log::out(), name, index, subindex);
         if (ec) {
-            std::cout << "FAILED: " << ec.message() << '\n';
+            stablecops::log::out() << "FAILED: " << ec.message() << '\n';
         } else {
-            writeHex(std::cout, value, 8) << " (" << value << ")\n";
+            writeHex(stablecops::log::out(), value, 8) << " (" << value << ")\n";
         }
         return std::pair<uint32_t, bool>{value, !ec};
     };
@@ -770,26 +867,26 @@ void MotorDriver::inspectNode() noexcept {
     auto read_i32 = [this](uint16_t index, uint8_t subindex, const char* name) {
         std::error_code ec;
         const auto value = Wait(AsyncRead<int32_t>(index, subindex), ec);
-        writeObjectName(std::cout, name, index, subindex);
+        writeObjectName(stablecops::log::out(), name, index, subindex);
         if (ec) {
-            std::cout << "FAILED: " << ec.message() << '\n';
+            stablecops::log::out() << "FAILED: " << ec.message() << '\n';
         } else {
-            writeHex(std::cout, static_cast<uint32_t>(value), 8) << " (" << value << ")\n";
+            writeHex(stablecops::log::out(), static_cast<uint32_t>(value), 8) << " (" << value << ")\n";
         }
         return std::pair<int32_t, bool>{value, !ec};
     };
 
-    std::cout << " identity\n";
+    stablecops::log::out() << " identity\n";
     read_u32(0x1018, 0x01, "vendor id");
     read_u32(0x1018, 0x02, "product code");
     read_u32(0x1018, 0x03, "revision");
     read_u32(0x1018, 0x04, "serial number");
 
-    std::cout << " DS402\n";
+    stablecops::log::out() << " DS402\n";
     const auto [statusword, status_ok] =
         read_u16(ds402::od::statusword, ds402::od::default_subindex, "statusword");
     if (status_ok) {
-        std::cout << "  decoded state = " << ds402::toString(ds402::decodeState(statusword))
+        stablecops::log::out() << "  decoded state = " << ds402::toString(ds402::decodeState(statusword))
                   << '\n';
     }
 
@@ -799,13 +896,13 @@ void MotorDriver::inspectNode() noexcept {
         ds402::od::modes_of_operation_display, ds402::od::default_subindex, "displayed mode");
     if (display_mode_ok) {
         const auto mode = static_cast<ds402::OperationMode>(static_cast<int8_t>(display_mode));
-        std::cout << "  decoded mode = " << ds402::toString(mode) << '\n';
+        stablecops::log::out() << "  decoded mode = " << ds402::toString(mode) << '\n';
     }
 
     const auto [position_counts, position_ok] =
         read_i32(ds402::od::position_actual_value, ds402::od::default_subindex, "position");
     if (position_ok && boot_actions_.counts_per_rev != 0) {
-        std::cout << "    -> "
+        stablecops::log::out() << "    -> "
                   << (static_cast<double>(position_counts) / boot_actions_.counts_per_rev * 360.0)
                   << " deg (" << boot_actions_.counts_per_rev << " counts/rev)\n";
     }
@@ -821,7 +918,7 @@ void MotorDriver::inspectNode() noexcept {
     // moves how much: 0x6063/0x6064 are the scaled control position, the single-
     // turn absolute registers (0x276F/0x2772) are the raw per-revolution encoder
     // angle, and 0x221A selects whether a second (load-side) encoder is used.
-    std::cout << " position feedback & scaling\n";
+    stablecops::log::out() << " position feedback & scaling\n";
     read_i32(0x6062, 0x00, "position demand value");
     read_i32(0x6063, 0x00, "position feedback value");
     read_i32(0x276F, 0x00, "encoder single-turn (primary)");
@@ -837,12 +934,12 @@ void MotorDriver::inspectNode() noexcept {
     // RPDOs, the cause is almost always here: a COB-ID with the valid bit set
     // (0x8000_0000), a COB-ID that does not match the master's expectation, or a
     // transmission type that is not cyclic-synchronous (1..240).
-    std::cout << " PDO configuration (drive side)\n";
+    stablecops::log::out() << " PDO configuration (drive side)\n";
     const auto dump_pdo = [&](const char* label, uint16_t comm_index, uint16_t map_index) {
         const auto [cob_id, cob_ok] = read_u32(comm_index, 0x01, label);
         if (cob_ok) {
             const bool valid = (cob_id & 0x80000000u) == 0;
-            std::cout << "    -> COB-ID 0x" << std::hex << (cob_id & 0x7FF) << std::dec
+            stablecops::log::out() << "    -> COB-ID 0x" << std::hex << (cob_id & 0x7FF) << std::dec
                       << (valid ? ", ENABLED" : ", DISABLED (valid bit set)") << '\n';
         }
         read_u8(comm_index, 0x02, "  transmission type");
@@ -868,7 +965,7 @@ void MotorDriver::inspectNode() noexcept {
     // block keeps the motor energised to hold the load for a configured window,
     // and the standard option codes select the ramp used for each transition.
     // 0x60FE reveals whether a holding brake is driven from a digital output.
-    std::cout << " disable / brake configuration\n";
+    stablecops::log::out() << " disable / brake configuration\n";
     read_u8(0x2103, 0x00, "disable mode");
     read_u32(0x2104, 0x00, "active disable speed threshold");
     read_u32(0x2105, 0x00, "active disable delay");
@@ -882,7 +979,7 @@ void MotorDriver::inspectNode() noexcept {
     read_u32(0x60FE, 0x01, "digital outputs (physical)");
     read_u32(0x60FE, 0x02, "digital outputs (mask)");
 
-    std::cout << " vendor runtime monitors\n";
+    stablecops::log::out() << " vendor runtime monitors\n";
     read_u8(0x2706, 0x00, "drive enable status");
     read_u8(0x2709, 0x00, "system state machine state");
     read_u8(0x270A, 0x00, "motor run loop state");
@@ -910,7 +1007,7 @@ void MotorDriver::runBootActions() noexcept {
                     boot_actions_.csp_relative_move.has_value());
         applyCspTarget();
     } catch (const std::exception& exception) {
-        std::cerr << "boot action failed: " << exception.what() << '\n';
+        stablecops::log::err() << "boot action failed: " << exception.what() << '\n';
     }
 }
 
@@ -1002,9 +1099,9 @@ bool MotorDriver::isDriveDeEnergized() const {
 void MotorDriver::finishGracefulStop() {
     stop_phase_ = StopPhase::Done;
     cyclic_active_ = false;
-    std::cout << "graceful stop: drive disabled (final state " << ds402::toString(feedback_.state)
+    stablecops::log::out() << "graceful stop: drive disabled (final state " << ds402::toString(feedback_.state)
               << ", statusword=";
-    writeHex(std::cout, feedback_.statusword, 4) << ")\n";
+    writeHex(stablecops::log::out(), feedback_.statusword, 4) << ")\n";
     if (on_stopped_) {
         on_stopped_();
     }
@@ -1018,7 +1115,7 @@ void MotorDriver::requestGracefulStop() {
     // If nothing is energised (inspect-only, idle, or a failed boot) there is no
     // DS402 ramp-down to perform; hand control straight back to the caller.
     if (!cyclic_active_) {
-        std::cout << "graceful stop: drive not energised; stopping master\n";
+        stablecops::log::out() << "graceful stop: drive not energised; stopping master\n";
         stop_phase_ = StopPhase::Done;
         if (on_stopped_) {
             on_stopped_();
@@ -1026,7 +1123,7 @@ void MotorDriver::requestGracefulStop() {
         return;
     }
 
-    std::cout << "graceful stop: de-energising drive (disable voltage)\n";
+    stablecops::log::out() << "graceful stop: de-energising drive (disable voltage)\n";
     // De-energise immediately: stop holding position and command disable-voltage
     // so the drive drops the power stage at once and the joint goes limp (coasts,
     // no brake). The command is streamed every SYNC until the drive confirms it
@@ -1037,6 +1134,49 @@ void MotorDriver::requestGracefulStop() {
     stop_phase_ = StopPhase::DisableVoltage;
     stop_phase_deadline_ = now + boot_actions_.state_transition_timeout;
     stop_log_due_ = now;
+}
+
+void MotorDriver::requestQuickStop() {
+    if (stop_phase_ != StopPhase::None && stop_phase_ != StopPhase::Done) {
+        stablecops::log::warn() << "quick stop ignored: a graceful stop is already in progress\n";
+        return;
+    }
+    if (!cyclic_active_) {
+        stablecops::log::warn() << "quick stop ignored: drive is not energised\n";
+        return;
+    }
+
+    // Quick stop is a priority action: abort any in-flight control sequence so
+    // nothing else drives the controlword this cycle.
+    setpoint_phase_ = SetpointPhase::Idle;
+    enable_phase_ = EnablePhase::Idle;
+    const bool homing_active = homing_phase_ != ds402::HomingPhase::Idle &&
+                               homing_phase_ != ds402::HomingPhase::Done &&
+                               homing_phase_ != ds402::HomingPhase::Failed;
+    if (homing_active) {
+        failHoming("quick stop requested");
+    }
+
+    // Stop commanding motion and glue the position target so a later re-enable
+    // cannot step, then command the CiA402 quick stop. The drive decelerates on
+    // its quick-stop ramp (0x6085, per option code 0x605A) instead of coasting,
+    // and stays energised in quick-stop-active when the option code keeps it
+    // there (5..8). The command image streams controlword every SYNC, so the
+    // hold persists without any further action.
+    if (hasCommand(ds402::od::target_velocity)) {
+        setCommandValue(ds402::od::target_velocity, 0);
+    }
+    if (hasCommand(ds402::od::target_torque)) {
+        setCommandValue(ds402::od::target_torque, 0);
+    }
+    if (hasCommand(ds402::od::target_position)) {
+        setCommandValue(ds402::od::target_position, feedback_.position);
+    }
+    csp_track_actual_ = false;
+    setControlword(ds402::controlword::quick_stop);
+    stablecops::log::out()
+        << "quick stop commanded: decelerating on the quick-stop ramp (holds energised in "
+           "quick-stop-active if option code 0x605A is 5..8)\n";
 }
 
 void MotorDriver::advanceGracefulStop() {
@@ -1052,26 +1192,26 @@ void MotorDriver::advanceGracefulStop() {
     setControlword(ds402::controlword::disable_voltage);
 
     if (isDriveDeEnergized()) {
-        std::cout << "graceful stop: power stage off (state " << ds402::toString(feedback_.state)
+        stablecops::log::out() << "graceful stop: power stage off (state " << ds402::toString(feedback_.state)
                   << ")\n";
         finishGracefulStop();
         return;
     }
 
     if (now >= stop_phase_deadline_) {
-        std::cerr << "graceful stop: timed out waiting for de-energize; forcing "
+        stablecops::log::err() << "graceful stop: timed out waiting for de-energize; forcing "
                      "shutdown (state="
                   << ds402::toString(feedback_.state) << " statusword=";
-        writeHex(std::cerr, feedback_.statusword, 4) << ")\n";
+        writeHex(stablecops::log::err(), feedback_.statusword, 4) << ")\n";
         finishGracefulStop();
         return;
     }
 
     if (now >= stop_log_due_) {
-        std::cout << "graceful stop: waiting for drive to de-energize; state="
+        stablecops::log::out() << "graceful stop: waiting for drive to de-energize; state="
                   << ds402::toString(feedback_.state) << " statusword=";
-        writeHex(std::cout, feedback_.statusword, 4) << " controlword=";
-        writeHex(std::cout, static_cast<uint32_t>(commandValue(ds402::od::controlword)), 4)
+        writeHex(stablecops::log::out(), feedback_.statusword, 4) << " controlword=";
+        writeHex(stablecops::log::out(), static_cast<uint32_t>(commandValue(ds402::od::controlword)), 4)
             << " torque=" << static_cast<int>(feedback_.torque)
             << " velocity=" << feedback_.velocity << '\n';
         stop_log_due_ = now + kPowerOffRetryLogInterval;
@@ -1080,7 +1220,7 @@ void MotorDriver::advanceGracefulStop() {
 
 void MotorDriver::enableDrive(bool prime_csp_target) {
     auto feedback = drive_.readFeedback();
-    std::cout << "enabling DS402 operation from state " << ds402::toString(feedback.state)
+    stablecops::log::out() << "enabling DS402 operation from state " << ds402::toString(feedback.state)
               << ", mode " << ds402::toString(feedback.mode) << '\n';
 
     if (feedback.state == ds402::State::Fault ||
@@ -1117,15 +1257,15 @@ void MotorDriver::enableDrive(bool prime_csp_target) {
         }
     }
 
-    std::cout << "  cyclic streaming active: sync cycles=" << sync_count_
+    stablecops::log::out() << "  cyclic streaming active: sync cycles=" << sync_count_
               << ", drive TPDO feedback "
               << (rpdo_seen_ ? "LIVE (cyclic)" : "NOT received (SDO fallback)") << "; statusword=";
-    writeHex(std::cout, feedback_.statusword, 4) << '\n';
+    writeHex(stablecops::log::out(), feedback_.statusword, 4) << '\n';
 
     if (feedback.state == ds402::State::OperationEnabled) {
         setControlword(ds402::controlword::enable_operation);
         csp_track_actual_ = false;
-        std::cout << "  drive already in operation enabled; holding position "
+        stablecops::log::out() << "  drive already in operation enabled; holding position "
                   << commandValue(ds402::od::target_position) << '\n';
         return;
     }
@@ -1151,12 +1291,12 @@ void MotorDriver::enableDrive(bool prime_csp_target) {
     // Freeze the held target at the position captured the instant we enabled.
     csp_track_actual_ = false;
 
-    std::cout << "  enabled operation, statusword=";
-    writeHex(std::cout, feedback.statusword, 4)
+    stablecops::log::out() << "  enabled operation, statusword=";
+    writeHex(stablecops::log::out(), feedback.statusword, 4)
         << " state=" << ds402::toString(feedback.state) << '\n';
 
     if (csp_mode) {
-        std::cout << "  holding current position at " << commandValue(ds402::od::target_position)
+        stablecops::log::out() << "  holding current position at " << commandValue(ds402::od::target_position)
                   << '\n';
     }
 }
@@ -1174,6 +1314,13 @@ void MotorDriver::requestFaultReset() {
     if (stop_phase_ != StopPhase::None) {
         return;  // a shutdown is already in progress; do not fight it
     }
+
+    // Clear the latched EMCY view so faulted() reflects the recovery attempt; a
+    // drive that is still in trouble will re-announce the emergency (and the
+    // statusword/0x603F fault path still catches a persisting fault).
+    feedback_.emergency_error_code = 0;
+    feedback_.error_register = 0;
+    feedback_.vendor_error.fill(0);
 
     // Reset targets to a safe hold before re-energising: zero any velocity/
     // torque setpoint and glue the position target to the measured position so
@@ -1198,7 +1345,7 @@ void MotorDriver::requestFaultReset() {
     enable_phase_ = EnablePhase::FaultReset;
     enable_phase_deadline_ =
         std::chrono::steady_clock::now() + boot_actions_.state_transition_timeout;
-    std::cout << "fault reset requested (recover to "
+    stablecops::log::out() << "fault reset requested (recover to "
               << (recover_to_enabled_ ? "operation enabled" : "disabled") << ")\n";
 }
 
@@ -1212,7 +1359,7 @@ void MotorDriver::requestEnableOperation(bool hold_position) {
     enableDrive(hold_position);
 }
 
-void MotorDriver::requestOperationMode(ds402::OperationMode mode) {
+void MotorDriver::requestOperationMode(ds402::OperationMode mode, bool confirm) {
     if (feedback_.state == ds402::State::OperationEnabled && std::abs(feedback_.velocity) > 0) {
         throw std::runtime_error("refusing to switch operation mode while velocity is nonzero");
     }
@@ -1237,8 +1384,28 @@ void MotorDriver::requestOperationMode(ds402::OperationMode mode) {
         throw std::system_error(ec, "SDO write to modes of operation (0x6060:00) failed");
     }
     boot_actions_.mode = mode;
-    std::cout << "operation mode requested: " << ds402::toString(mode)
+    stablecops::log::out() << "operation mode requested: " << ds402::toString(mode)
               << " (0x6060=" << static_cast<int>(static_cast<int8_t>(mode)) << ")\n";
+
+    // Writing 0x6060 only requests the mode; the drive reflects the mode it has
+    // actually entered in 0x6061. Confirm it took, so a firmware/state that
+    // silently rejects the change surfaces as an error instead of leaving the
+    // caller commanding the wrong mode. Only done off the cyclic path (the
+    // homing restore drives this from OnSync and must stay non-blocking).
+    if (confirm) {
+        const auto deadline =
+            std::chrono::steady_clock::now() + boot_actions_.state_transition_timeout;
+        while (drive_.readMode() != mode) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error(
+                    "operation mode change to " + ds402::toString(mode) +
+                    " was not confirmed by the drive (0x6061) within the timeout");
+            }
+            USleep(2000);
+        }
+        stablecops::log::out() << "  operation mode confirmed by 0x6061: " << ds402::toString(mode)
+                  << '\n';
+    }
 }
 
 void MotorDriver::requestHoming(const ds402::HomingConfig& config) {
@@ -1316,7 +1483,7 @@ void MotorDriver::requestHoming(const ds402::HomingConfig& config) {
     if (hasCommand(ds402::od::target_torque)) {
         setCommandValue(ds402::od::target_torque, 0);
     }
-    std::cout << "homing: searching negative hardstop from position " << feedback_.position
+    stablecops::log::out() << "homing: searching negative hardstop from position " << feedback_.position
               << " at velocity " << -std::abs(config.search_velocity) << '\n';
 }
 
@@ -1335,7 +1502,7 @@ bool MotorDriver::homingContactDetected(int /*direction*/,
     if (!homing_contact_active_) {
         homing_contact_active_ = true;
         homing_contact_since_ = now;
-        std::cout << "homing: contact torque threshold reached at position "
+        stablecops::log::out() << "homing: contact torque threshold reached at position "
                   << feedback_.position << " (torque=" << static_cast<int>(feedback_.torque)
                   << "); commanding zero velocity\n";
     }
@@ -1358,7 +1525,7 @@ void MotorDriver::failHoming(const std::string& reason) {
     homing_result_.success = false;
     homing_contact_active_ = false;
     homing_phase_ = ds402::HomingPhase::Failed;
-    std::cerr << "homing failed: " << reason << " (position=" << feedback_.position
+    stablecops::log::err() << "homing failed: " << reason << " (position=" << feedback_.position
               << ", velocity=" << feedback_.velocity
               << ", torque=" << static_cast<int>(feedback_.torque) << ")\n";
 }
@@ -1419,7 +1586,7 @@ void MotorDriver::advanceHoming() {
                 homing_contact_active_ = false;
                 setCommandValue(ds402::od::target_velocity, command_approach_velocity);
                 homing_phase_ = ds402::HomingPhase::BackoffNegative;
-                std::cout << "homing: negative hardstop at "
+                stablecops::log::out() << "homing: negative hardstop at "
                           << homing_result_.lower_limit_position << "; backing off to "
                           << homing_backoff_target_ << '\n';
             }
@@ -1431,7 +1598,7 @@ void MotorDriver::advanceHoming() {
                 homing_contact_active_ = false;
                 setCommandValue(ds402::od::target_velocity, command_search_velocity);
                 homing_phase_ = ds402::HomingPhase::SearchPositive;
-                std::cout << "homing: searching positive hardstop\n";
+                stablecops::log::out() << "homing: searching positive hardstop\n";
             }
             break;
 
@@ -1461,7 +1628,7 @@ void MotorDriver::advanceHoming() {
                 homing_contact_active_ = false;
                 homing_deadline_ = now + homing_config_.timeout;
                 homing_phase_ = ds402::HomingPhase::MoveToCenter;
-                std::cout << "homing: positive hardstop at "
+                stablecops::log::out() << "homing: positive hardstop at "
                           << homing_result_.upper_limit_position << "; center target "
                           << homing_center_target_ << '\n';
             }
@@ -1474,7 +1641,7 @@ void MotorDriver::advanceHoming() {
                 setCommandValue(ds402::od::target_velocity, 0);
                 homing_settle_until_ = now + homing_config_.settle_time;
                 homing_phase_ = ds402::HomingPhase::WaitAtCenter;
-                std::cout << "homing: center reached, settling\n";
+                stablecops::log::out() << "homing: center reached, settling\n";
             } else {
                 const auto speed = std::llabs(delta) > homing_config_.center_slowdown_distance
                                        ? command_center_velocity
@@ -1505,7 +1672,7 @@ void MotorDriver::advanceHoming() {
                 drive_.storeApplicationParameters();
             }
             homing_result_.success = true;
-            std::cout << "homing: zero set at center (lower="
+            stablecops::log::out() << "homing: zero set at center (lower="
                       << homing_result_.lower_limit_position
                       << ", upper=" << homing_result_.upper_limit_position
                       << ", travel=" << homing_result_.travel << ")\n";
@@ -1516,7 +1683,7 @@ void MotorDriver::advanceHoming() {
                 homing_deadline_ = now + homing_config_.timeout;
                 setControlword(ds402::controlword::disable_voltage);
                 homing_phase_ = ds402::HomingPhase::RestoreDisable;
-                std::cout << "homing: restoring previous mode "
+                stablecops::log::out() << "homing: restoring previous mode "
                           << ds402::toString(homing_restore_mode_) << '\n';
             }
             break;
@@ -1575,7 +1742,7 @@ void MotorDriver::advanceHoming() {
             }
             if (feedback_.state == ds402::State::OperationEnabled) {
                 homing_phase_ = ds402::HomingPhase::Done;
-                std::cout << "homing: previous mode/state restored\n";
+                stablecops::log::out() << "homing: previous mode/state restored\n";
             } else {
                 failHoming("failed to restore previous operation enabled state");
             }
@@ -1593,9 +1760,9 @@ void MotorDriver::advanceEnableLadder() {
     const auto state = feedback_.state;
 
     const auto fail = [&](const char* during) {
-        std::cerr << "fault recovery: timed out during " << during
+        stablecops::log::err() << "fault recovery: timed out during " << during
                   << " (state=" << ds402::toString(state) << ", statusword=";
-        writeHex(std::cerr, feedback_.statusword, 4) << ")\n";
+        writeHex(stablecops::log::err(), feedback_.statusword, 4) << ")\n";
         setControlword(ds402::controlword::disable_voltage);
         csp_track_actual_ = false;
         enable_phase_ = EnablePhase::Idle;
@@ -1627,7 +1794,7 @@ void MotorDriver::advanceEnableLadder() {
                     setControlword(ds402::controlword::shutdown);
                     csp_track_actual_ = false;
                     enable_phase_ = EnablePhase::Idle;
-                    std::cout << "fault recovery: fault cleared; drive disabled\n";
+                    stablecops::log::out() << "fault recovery: fault cleared; drive disabled\n";
                 }
             } else if (now >= enable_phase_deadline_) {
                 fail("fault reset");
@@ -1655,8 +1822,8 @@ void MotorDriver::advanceEnableLadder() {
             if (state == ds402::State::OperationEnabled) {
                 csp_track_actual_ = false;  // freeze the held position
                 enable_phase_ = EnablePhase::Idle;
-                std::cout << "fault recovery: operation re-enabled (statusword=";
-                writeHex(std::cout, feedback_.statusword, 4) << ")\n";
+                stablecops::log::out() << "fault recovery: operation re-enabled (statusword=";
+                writeHex(stablecops::log::out(), feedback_.statusword, 4) << ")\n";
             } else if (now >= enable_phase_deadline_) {
                 fail("enable operation");
             }
@@ -1735,7 +1902,7 @@ void MotorDriver::applyCspTarget() {
     }
 
     drive_.setCspTargetPosition(static_cast<int32_t>(target));
-    std::cout << "  CSP target position set to " << target << " (delta " << delta << " counts)\n";
+    stablecops::log::out() << "  CSP target position set to " << target << " (delta " << delta << " counts)\n";
 }
 
 }  // namespace stablecops::lely

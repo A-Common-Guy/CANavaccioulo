@@ -101,8 +101,11 @@ public:
     // Request a CiA402 operation-mode change by writing 0x6060 over SDO. When
     // changing into a position mode while already enabled, the position target is
     // first glued to the actual position so the mode switch cannot introduce a
-    // step. Safe to call from the driver's fiber executor.
-    void requestOperationMode(ds402::OperationMode mode);
+    // step. When `confirm` is set, block on this driver's fiber until the drive
+    // reflects the new mode in 0x6061 (throwing on timeout); `confirm` must stay
+    // false when called from the cyclic path (OnSync), which cannot block. Safe
+    // to call from the driver's fiber executor.
+    void requestOperationMode(ds402::OperationMode mode, bool confirm = false);
 
     // Begin a non-blocking shutdown: immediately command disable-voltage so the
     // power stage drops and the joint goes limp (coasts, no brake), then invoke
@@ -111,6 +114,16 @@ public:
     // disable command is streamed from OnSync so SYNC keeps flowing meanwhile.
     void requestGracefulStop();
     void setStoppedCallback(std::function<void()> on_stopped);
+
+    // Controlled quick stop: command the CiA402 quick-stop (controlword 0x02) so
+    // the drive decelerates on its quick-stop ramp instead of coasting, then
+    // holds in quick-stop-active (still energised) when its quick-stop option
+    // code (0x605A) is configured to stay there. Motion targets are zeroed and
+    // the position target glued first so a later re-enable never steps. Unlike
+    // requestGracefulStop this keeps the power stage on and does not tear the bus
+    // down; recover with requestEnableOperation()/requestFaultReset(). Safe to
+    // call from the event loop.
+    void requestQuickStop();
 
     // Thread-safe snapshot of the latest feedback, published every cycle from the
     // loop thread. Safe to call from any thread (e.g. an application reading
@@ -146,6 +159,16 @@ protected:
     void OnRpdoWrite(uint16_t index, uint8_t subindex) noexcept override;
     void OnSync(uint8_t counter, const time_point& time) noexcept override;
 
+    // Standard CANopen fault channels, orthogonal to the cyclic TPDO stream.
+    // OnEmcy surfaces the drive's emergency messages (eec/error register/vendor
+    // bytes) into the fault path; OnState/OnHeartbeat/OnNodeGuarding detect node
+    // loss via the master's consumer heartbeat (or node guarding) independently
+    // of PDO cadence.
+    void OnEmcy(uint16_t eec, uint8_t er, uint8_t msef[5]) noexcept override;
+    void OnState(::lely::canopen::NmtState state) noexcept override;
+    void OnHeartbeat(bool occurred) noexcept override;
+    void OnNodeGuarding(bool occurred) noexcept override;
+
 private:
     void advanceHoming();
     void failHoming(const std::string& reason);
@@ -174,8 +197,16 @@ private:
     bool isDriveDeEnergized() const;
     void finishGracefulStop();
 
+    // Common reaction to a lost/restored node reported by heartbeat or node
+    // guarding: log once, drop liveness, and de-energise if still running.
+    void handleNodeLoss(const char* channel, bool lost);
+
     bool isCommandObject(uint16_t index) const;
     bool isFeedbackObject(uint16_t index) const;
+    // True when `index` actually rides in an active TxPDO (i.e. its cached value
+    // is refreshed every cycle), so a read can be served from the snapshot
+    // instead of a blocking SDO round trip.
+    bool feedbackMapped(uint16_t index) const;
 
     // Cyclic exchange driven entirely by the loaded PdoMap.
     void buildCyclicObjects();
@@ -247,6 +278,10 @@ private:
     // Feedback-staleness watchdog state.
     std::chrono::steady_clock::time_point last_feedback_time_{};
     bool fault_active_logged_{false};
+
+    // Node-loss latch shared by the heartbeat and node-guarding channels, so the
+    // reaction and logging happen once per loss regardless of which fired.
+    bool node_loss_{false};
 
     StopPhase stop_phase_{StopPhase::None};
     std::chrono::steady_clock::time_point stop_phase_deadline_{};

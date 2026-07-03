@@ -295,13 +295,23 @@ def build_dcfgen_yaml(profile: dict[str, Any], normalized_eds: Path, root: Path)
     nodes = collect_nodes(profile)
     no_strict = bool(profile.get("generation", {}).get("no_strict", False))
 
+    options: dict[str, Any] = {
+        "dcf_path": profile["generation"].get("dcf_dir", "dcf"),
+    }
+    # Default consumer-timeout multiplier for every node's heartbeat (the master
+    # times out at producer_time * multiplier). dcfgen defaults this to 3.0;
+    # expose it here so a profile can tune the detection window globally.
+    if "heartbeat_multiplier" in master:
+        options["heartbeat_multiplier"] = float(master["heartbeat_multiplier"])
+
     config: dict[str, Any] = {
-        "options": {
-            "dcf_path": profile["generation"].get("dcf_dir", "dcf"),
-        },
+        "options": options,
         "master": {
             "node_id": master.get("node_id", 127),
             "baudrate": master.get("baudrate", 1000),
+            # When true, the master monitors each node that produces a heartbeat
+            # (builds its 0x1016 consumer heartbeat image), so node loss is
+            # detected independently of PDO cadence.
             "heartbeat_consumer": master.get("heartbeat_consumer", False),
             "heartbeat_producer": master.get("heartbeat_producer", 0),
             "sync_period": master.get("sync_period", 0),
@@ -318,13 +328,23 @@ def build_dcfgen_yaml(profile: dict[str, Any], normalized_eds: Path, root: Path)
     # normalized EDS; dcfgen resolves the $NODEID-relative COB-IDs per node and
     # builds the master's RPDO/TPDO image for every slave.
     for node in nodes:
-        config[node["name"]] = {
+        node_config: dict[str, Any] = {
             "dcf": relpath(normalized_eds, root),
             "node_id": node.get("node_id", 1),
             "mandatory": node.get("mandatory", True),
             "boot": node.get("boot", True),
             "reset_communication": node.get("reset_communication", True),
         }
+        # A node's producer heartbeat (its 0x1017) is what lets the master
+        # detect its loss: with master.heartbeat_consumer set, dcfgen adds a
+        # 0x1016 consumer entry on the master for every node whose
+        # heartbeat_producer is non-zero (timeout = producer * multiplier). Pass
+        # it (and an optional per-node multiplier) through only when asked.
+        if "heartbeat_producer" in node:
+            node_config["heartbeat_producer"] = int(node["heartbeat_producer"])
+        if "heartbeat_multiplier" in node:
+            node_config["heartbeat_multiplier"] = float(node["heartbeat_multiplier"])
+        config[node["name"]] = node_config
 
     if no_strict:
         config["options"]["no_strict"] = True

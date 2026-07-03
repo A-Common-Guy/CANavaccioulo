@@ -46,6 +46,14 @@ public:
     // bus is torn down when the last MotorDrive on the interface is destroyed.
     void stop();
 
+    // Controlled quick stop: decelerate on the drive's quick-stop ramp (rather
+    // than coasting like stop()) and hold in quick-stop-active while energised,
+    // when the drive's quick-stop option code (0x605A) is configured to stay
+    // there. Keeps the power stage on and does not tear down the shared bus;
+    // recover with enableOperation() or resetFault(). Prefer this over stop()
+    // for a loaded or vertical axis, where coasting would drop the load.
+    void quickStop();
+
     // Tooling-oriented controls for the shared bus. shutdownBus() gracefully
     // tears down the whole chain; forceStopBus() breaks a stuck graceful
     // shutdown by stopping the CANopen loop immediately.

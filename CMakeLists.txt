@@ -24,6 +24,14 @@ target_compile_options(stablecops_lely_project_options INTERFACE
 target_link_libraries(stablecops_lely_project_options INTERFACE PkgConfig::LELY_COAPP)
 message(STATUS "Lely CANopen dependency found through pkg-config: liblely-coapp")
 
+add_library(stablecops_log
+    src/log/Log.cpp
+)
+target_include_directories(stablecops_log PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(stablecops_log PUBLIC stablecops_lely_project_options)
+
 add_library(stablecops_ds402
     src/ds402/DriveController.cpp
     src/ds402/State.cpp
@@ -52,7 +60,7 @@ add_library(stablecops_runtime
 target_include_directories(stablecops_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(stablecops_runtime PUBLIC stablecops_ds402 stablecops_config Threads::Threads)
+target_link_libraries(stablecops_runtime PUBLIC stablecops_log stablecops_ds402 stablecops_config Threads::Threads)
 
 add_executable(stablecops_master
     src/tools/stablecops_master.cpp

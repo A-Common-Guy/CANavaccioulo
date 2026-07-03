@@ -150,11 +150,27 @@ drive.commandTorque(units);             // CST / PT
 drive.moveToPosition(counts, relative); // PP (drive runs its own trajectory)
 
 // Status + fault handling:
-if (drive.faulted()) {
+if (drive.faulted()) {                   // statusword fault, 0x603F, or an EMCY
     drive.resetFault();                  // clear + recover to the configured state
 }
 bool ok = drive.enabled();               // true only with live feedback
-drive.stop();                            // graceful de-energise of this node
+drive.quickStop();                       // decelerate on the quick-stop ramp (holds energised)
+drive.stop();                            // graceful de-energise of this node (coasts)
+```
+
+Logging:
+
+The library never writes to `std::cout` / `std::cerr` directly. All runtime
+output goes through `stablecops::log`, which by default forwards whole lines to
+stderr (errors/warnings) and stdout (info). Embed a custom sink to redirect,
+prefix, or silence it, and raise/lower the minimum level:
+
+```cpp
+#include "stablecops/log/Log.hpp"
+stablecops::log::setLevel(stablecops::log::Level::Warn);   // quieter
+stablecops::log::setSink([](stablecops::log::Level level, const std::string& line) {
+    myLogger.log(stablecops::log::toString(level), line);  // route into your logger
+});
 ```
 
 Multiple drives & one shared bus:
@@ -220,7 +236,15 @@ Safety behaviour:
 - **Fault handling**: faults are logged with statusword/error code as they occur.
   `faulted()` / `enabled()` / `errorCode()` report drive status, and `resetFault()`
   clears a latched fault and recovers to the configured operating state without a
-  restart.
+  restart. Faults are detected on three independent channels: the DS402
+  statusword/`0x603F` in the cyclic TPDO, the drive's EMCY emergency messages
+  (surfaced as `emergency_error_code` / `error_register`), and node loss via the
+  master's consumer heartbeat (`node_alive`, ~300 ms window by default).
+- **Stopping**: `stop()` commands disable-voltage, so the joint coasts (goes limp,
+  no brake) - fine for a free axis. For a loaded or vertical axis prefer
+  `quickStop()`, which decelerates on the drive's quick-stop ramp and holds in
+  quick-stop-active while energised (when the drive's option code `0x605A` is set
+  to 5..8). Neither tears down the shared bus; recover with `enableOperation()`.
 - **Position units**: `feedback().position` is the raw `0x6064` count (output-shaft
   referenced, seeded from the absolute encoder at power-on). `positionDegrees()` /
   `positionRadians()` convert it via `config.counts_per_rev` (default 524288 =

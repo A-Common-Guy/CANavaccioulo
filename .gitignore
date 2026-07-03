@@ -13,3 +13,5 @@ logs/
 .cache*
 *.idx
 sdk/
+dcf/master.dcf
+dcf/

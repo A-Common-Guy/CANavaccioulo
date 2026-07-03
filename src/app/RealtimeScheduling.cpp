@@ -8,18 +8,19 @@
 
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
+
+#include "stablecops/log/Log.hpp"
 
 namespace stablecops::app {
 
 namespace {
 
 void warn(const char* what, int err) {
-    std::cerr << "realtime: " << what << " failed (" << std::strerror(err)
+    stablecops::log::warn() << "realtime: " << what << " failed (" << std::strerror(err)
               << "); continuing at normal priority. Grant CAP_SYS_NICE or raise "
                  "the rtprio ulimit (e.g. limits.conf '<user> - rtprio 99', "
                  "'<user> - memlock unlimited') to enable it.\n";

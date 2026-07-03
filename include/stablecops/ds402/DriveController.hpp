@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 
@@ -15,7 +16,20 @@ struct Feedback {
     int32_t position{0};
     int32_t velocity{0};
     int16_t torque{0};
+    // DS402 error code (0x603F), streamed in the cyclic TPDO image.
     uint16_t error_code{0};
+    // Last EMCY announced by the drive over the dedicated emergency channel
+    // (COB 0x080+id): the emergency error code, the error register (0x1001) and
+    // the five manufacturer-specific bytes. Surfaced independently of the TPDO
+    // so an internally-latched fault is visible even while cyclic feedback keeps
+    // flowing. Cleared when the drive announces "no error" (EMCY 0x0000) or on a
+    // fault reset.
+    uint16_t emergency_error_code{0};
+    uint8_t error_register{0};
+    std::array<uint8_t, 5> vendor_error{};
+    // False once the master's consumer heartbeat (or node guarding) has lost the
+    // node, independently of TPDO staleness.
+    bool node_alive{true};
 };
 
 struct HomingConfig {
@@ -61,48 +75,31 @@ enum class HomingPhase : uint8_t {
     Failed,
 };
 
+// Thin, transport-independent facade over the DS402 object dictionary.
+//
+// This owns only what the runtime actually uses: reading a coherent feedback
+// snapshot and staging the cyclic setpoints / zero / store commands. The DS402
+// state machine itself (fault reset, the shutdown -> switch-on -> enable ladder,
+// mode changes, and the Profile Position handshake) is driven non-blocking from
+// the cyclic path in stablecops::lely::MotorDriver, not here, so no blocking
+// controlword transitions live on this class.
 class DriveController {
 public:
     explicit DriveController(ObjectAccess& object_access);
 
     Feedback readFeedback();
-
-    void resetFault();
-    void shutdown();
-    void switchOn();
-    void enableOperation();
-    void disableVoltage();
-    void quickStop();
-    void halt();
-
-    Feedback waitForState(State expected, std::chrono::milliseconds timeout,
-                          std::chrono::milliseconds poll_interval = std::chrono::milliseconds{20});
-    Feedback enableOperationSafely(std::chrono::milliseconds timeout = std::chrono::milliseconds{
-                                       2000});
-    int32_t primeCspTargetToCurrentPosition();
-    uint32_t readSupportedModes();
-    void requestMode(OperationMode mode);
-
-    void switchModeSafely(OperationMode mode, int32_t stationary_velocity_threshold = 0);
     OperationMode readMode();
-
-    void setProfilePosition(int32_t target_position, uint32_t velocity, uint32_t acceleration,
-                            uint32_t deceleration);
-    void triggerAbsoluteProfilePosition();
-    void triggerRelativeProfilePosition();
 
     void setCspTargetPosition(int32_t target_position);
     void setCsvTargetVelocity(int32_t target_velocity);
     void setCstTargetTorque(int16_t target_torque);
     void setCurrentPositionAsZero();
     void storeApplicationParameters();
-    void stopCsvMotion();
 
 private:
     ObjectAccess& object_access_;
 
     uint16_t readStatusword();
-    void writeControlword(uint16_t value);
 };
 
 }  // namespace stablecops::ds402

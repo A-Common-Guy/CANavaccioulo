@@ -759,7 +759,8 @@ const char* indexHtml() {
         <button onclick="post('/api/enable', {hold:true})">Enable + Hold</button>
         <button class="secondary" onclick="post('/api/enable', {hold:false})">Enable</button>
         <button class="warn" onclick="post('/api/fault-reset', {})">Fault Reset</button>
-        <button class="danger" onclick="post('/api/stop', {})">Stop</button>
+        <button class="warn" onclick="post('/api/quick-stop', {})">Quick Stop</button>
+        <button class="danger" onclick="post('/api/stop', {})">Stop (coast)</button>
       </div>
     </section>
     <section class="card">
@@ -940,7 +941,12 @@ json feedbackJson(uint8_t node_id, stablecops::app::MotorDrive& drive) {
           {"velocity", feedback.velocity},
           {"torque", feedback.torque},
           {"error_code", feedback.error_code},
-          {"error_code_hex", hexValue(feedback.error_code, 4)}}},
+          {"error_code_hex", hexValue(feedback.error_code, 4)},
+          {"node_alive", feedback.node_alive},
+          {"emcy_error_code", feedback.emergency_error_code},
+          {"emcy_error_code_hex", hexValue(feedback.emergency_error_code, 4)},
+          {"error_register", feedback.error_register},
+          {"error_register_hex", hexValue(feedback.error_register, 2)}}},
         {"cyclic_stats",
          {{"cycles", stats.cycles},
           {"last_us", stats.last_us},
@@ -1115,6 +1121,11 @@ public:
             if (request.path == "/api/stop") {
                 drive.stop();
                 return jsonResponse({{"ok", true}, {"node", targetNode(body)}, {"action", "stop"}});
+            }
+            if (request.path == "/api/quick-stop") {
+                drive.quickStop();
+                return jsonResponse(
+                    {{"ok", true}, {"node", targetNode(body)}, {"action", "quick-stop"}});
             }
             if (request.path == "/api/fault-reset") {
                 drive.resetFault();

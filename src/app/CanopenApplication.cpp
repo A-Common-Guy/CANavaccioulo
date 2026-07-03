@@ -1,6 +1,7 @@
 #include "stablecops/app/CanopenApplication.hpp"
 
 #include "stablecops/config/PdoMap.hpp"
+#include "stablecops/log/Log.hpp"
 
 #include <lely/coapp/master.hpp>
 #include <lely/ev/loop.hpp>
@@ -98,14 +99,14 @@ public:
     void armSignalWait() {
         sigset_.submit_wait(executor_, [this](int signo) {
             if (!shutdown_initiated_) {
-                std::cout << "\nreceived signal " << signo
+                stablecops::log::out() << "\nreceived signal " << signo
                           << "; disabling drives and shutting down...\n";
                 requestShutdown();
                 // Re-arm so a second signal forces an immediate stop if the
                 // controlled ramp-down stalls (e.g. lost feedback).
                 armSignalWait();
             } else {
-                std::cout << "\nsecond signal; forcing immediate shutdown\n";
+                stablecops::log::out() << "\nsecond signal; forcing immediate shutdown\n";
                 loop_.stop();
             }
         });

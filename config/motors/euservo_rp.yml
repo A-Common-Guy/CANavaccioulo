@@ -6,8 +6,12 @@ vendor_eds: eds/EDS files/EuServo_RP_EDS_（RP）V1.4.eds
 master:
   node_id: 127
   baudrate: 1000
-  heartbeat_consumer: false
+  # Consume each node's producer heartbeat so the master detects node loss on a
+  # dedicated error-control channel, independently of TPDO cadence. The consumer
+  # timeout is heartbeat_producer * heartbeat_multiplier per node.
+  heartbeat_consumer: true
   heartbeat_producer: 0
+  heartbeat_multiplier: 3.0
   sync_period: 2000
   sync_window: 0
   start: true
@@ -18,11 +22,12 @@ master:
 
 # Multiple homogeneous joints on one chain. All nodes share this same EDS and
 # PDO layout, differing only by node id; dcfgen builds the master's image for
-# every slave.
+# every slave. Each node produces a 100 ms heartbeat (0x1017), so the master
+# flags it lost after ~300 ms (100 ms * 3.0) even if it keeps emitting TPDOs.
 nodes:
- - { name: rp_joint_1, node_id: 1, mandatory: true, boot: true }
- - { name: rp_joint_2, node_id: 2, mandatory: false, boot: true }
-#   - { name: rp_joint_3, node_id: 3 }
+ - { name: rp_joint_1, node_id: 1, mandatory: true, boot: true, heartbeat_producer: 100 }
+ - { name: rp_joint_2, node_id: 2, mandatory: false, boot: true, heartbeat_producer: 100 }
+#   - { name: rp_joint_3, node_id: 3, heartbeat_producer: 100 }
 
 generation:
   generated_dir: generated/canopen/euservo_rp

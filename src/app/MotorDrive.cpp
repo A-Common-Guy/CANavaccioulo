@@ -31,6 +31,11 @@ void MotorDrive::stop() {
     }
 }
 
+void MotorDrive::quickStop() {
+    bus_->postToDriver(node_id_,
+                       [](stablecops::lely::MotorDriver& motor) { motor.requestQuickStop(); });
+}
+
 void MotorDrive::shutdownBus() {
     if (bus_) {
         bus_->shutdown();
@@ -84,7 +89,7 @@ bool MotorDrive::enabled() const {
 bool MotorDrive::faulted() const {
     const auto fb = feedback();
     return fb.state == ds402::State::Fault || fb.state == ds402::State::FaultReactionActive ||
-           fb.error_code != 0;
+           fb.error_code != 0 || fb.emergency_error_code != 0;
 }
 
 uint16_t MotorDrive::errorCode() const {
@@ -104,7 +109,7 @@ void MotorDrive::enableOperation(bool hold_position) {
 
 void MotorDrive::setOperationMode(ds402::OperationMode mode) {
     bus_->invokeOnDriver(node_id_, [mode](stablecops::lely::MotorDriver& motor) {
-        motor.requestOperationMode(mode);
+        motor.requestOperationMode(mode, /*confirm=*/true);
     });
 }
 
