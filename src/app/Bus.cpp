@@ -119,7 +119,7 @@ void Bus::start() {
 
         app_.store(app.get(), std::memory_order_release);
         running_.store(true);
-        app->resetMaster();
+        app->post([app = app.get()] { app->resetMaster(); });
         ready.set_value();
 
         app->run();

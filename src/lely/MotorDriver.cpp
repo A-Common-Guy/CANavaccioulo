@@ -439,21 +439,27 @@ void MotorDriver::OnConfig(std::function<void(std::error_code)> result) noexcept
     // writes to its command objects and PDO parameters (writing them once the
     // node is operational aborts with 0x00000002). We only reconfigure when a
     // motion action is requested so that --inspect stays read-only.
-    std::error_code ec;
-    if (wantsCyclicConfig()) {
-        ec = configurePdos();
-        if (!ec) {
-            ec = selectOperationMode();
+    //
+    // Lely requires OnConfig() itself to be non-blocking. The SDO helpers below
+    // use FiberDriver::Wait(), so run them on this driver's fiber executor and
+    // report completion asynchronously.
+    Defer([this, result = std::move(result)]() mutable {
+        std::error_code ec;
+        if (wantsCyclicConfig()) {
+            ec = configurePdos();
+            if (!ec) {
+                ec = selectOperationMode();
+            }
+            if (!ec) {
+                ec = configureProfileParameters();
+            }
+            if (ec) {
+                std::cerr << "node " << static_cast<int>(id())
+                          << " configuration failed: " << ec.message() << '\n';
+            }
         }
-        if (!ec) {
-            ec = configureProfileParameters();
-        }
-        if (ec) {
-            std::cerr << "node " << static_cast<int>(id())
-                      << " configuration failed: " << ec.message() << '\n';
-        }
-    }
-    result(ec);
+        result(ec);
+    });
 }
 
 std::error_code MotorDriver::selectOperationMode() noexcept {
@@ -580,10 +586,10 @@ std::error_code MotorDriver::configurePdos() noexcept {
             return false;
         }
         std::cout << "node " << static_cast<int>(id()) << ": " << role << " 0x" << std::hex
-                  << pdo.comm_index << std::dec
-                  << " COB-ID 0x" << std::hex << base_cob_id << std::dec
-                  << " set to transmission type " << static_cast<int>(pdo.transmission_type) << ", "
-                  << pdo.entries.size() << " mapped objects\n";
+                  << pdo.comm_index << std::dec << " COB-ID 0x" << std::hex << base_cob_id
+                  << std::dec << " set to transmission type "
+                  << static_cast<int>(pdo.transmission_type) << ", " << pdo.entries.size()
+                  << " mapped objects\n";
         return true;
     };
 
@@ -603,8 +609,7 @@ std::error_code MotorDriver::configurePdos() noexcept {
                 return ec;
             }
             std::cout << "node " << static_cast<int>(id()) << ": RxPDO 0x" << std::hex
-                      << pdo.comm_index << std::dec
-                      << " disabled (unused)\n";
+                      << pdo.comm_index << std::dec << " disabled (unused)\n";
         }
     }
 

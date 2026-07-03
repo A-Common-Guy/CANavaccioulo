@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -235,7 +236,120 @@ std::string objectValueHex(int64_t value, stablecops::app::ObjectDataType type) 
     return "0x0";
 }
 
-json commonObjects() {
+std::string dataTypeToUiType(const std::string& data_type) {
+    const auto code = static_cast<uint32_t>(parseUnsignedText(data_type, 0xFFFF));
+    switch (code) {
+        case 0x0002:
+            return "i8";
+        case 0x0003:
+            return "i16";
+        case 0x0004:
+            return "i32";
+        case 0x0005:
+            return "u8";
+        case 0x0006:
+            return "u16";
+        case 0x0007:
+            return "u32";
+        default:
+            return "unsupported";
+    }
+}
+
+std::string dataTypeName(const std::string& data_type) {
+    const auto code = static_cast<uint32_t>(parseUnsignedText(data_type, 0xFFFF));
+    switch (code) {
+        case 0x0001:
+            return "BOOLEAN";
+        case 0x0002:
+            return "INTEGER8";
+        case 0x0003:
+            return "INTEGER16";
+        case 0x0004:
+            return "INTEGER32";
+        case 0x0005:
+            return "UNSIGNED8";
+        case 0x0006:
+            return "UNSIGNED16";
+        case 0x0007:
+            return "UNSIGNED32";
+        case 0x0008:
+            return "REAL32";
+        case 0x0009:
+            return "VISIBLE_STRING";
+        case 0x000A:
+            return "OCTET_STRING";
+        case 0x000B:
+            return "UNICODE_STRING";
+        case 0x0011:
+            return "REAL64";
+        default:
+            return data_type;
+    }
+}
+
+std::string objectCategory(uint16_t index) {
+    if (index < 0x2000) {
+        return "Communication / standard";
+    }
+    if (index < 0x6000) {
+        return "Manufacturer";
+    }
+    if (index < 0x7000) {
+        return "CiA402 / profile";
+    }
+    return "Other";
+}
+
+bool parseEdsSectionName(const std::string& section, uint16_t& index, uint8_t& subindex) {
+    if (section.size() == 4) {
+        index = static_cast<uint16_t>(parseUnsignedText("0x" + section, 0xFFFF));
+        subindex = 0;
+        return true;
+    }
+    const auto sub_pos = section.find("sub");
+    if (sub_pos == 4 && section.size() > 7) {
+        index = static_cast<uint16_t>(parseUnsignedText("0x" + section.substr(0, 4), 0xFFFF));
+        subindex =
+            static_cast<uint8_t>(parseUnsignedText("0x" + section.substr(sub_pos + 3), 0xFF));
+        return true;
+    }
+    return false;
+}
+
+using EdsSection = std::map<std::string, std::string>;
+
+std::map<std::string, EdsSection> readEdsSections(const std::string& path) {
+    std::ifstream file(path);
+    if (!file) {
+        throw std::runtime_error("failed to open EDS object dictionary: " + path);
+    }
+
+    std::map<std::string, EdsSection> sections;
+    std::string current;
+    std::string line;
+    while (std::getline(file, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == ';') {
+            continue;
+        }
+        if (line.front() == '[' && line.back() == ']') {
+            current = line.substr(1, line.size() - 2);
+            sections[current];
+            continue;
+        }
+        const auto equals = line.find('=');
+        if (current.empty() || equals == std::string::npos) {
+            continue;
+        }
+        const auto key = trim(line.substr(0, equals));
+        const auto value = trim(line.substr(equals + 1));
+        sections[current][key] = value;
+    }
+    return sections;
+}
+
+json builtinObjects() {
     return json::array({
         {{"name", "Statusword"},
          {"index", "0x6041"},
@@ -328,6 +442,56 @@ json commonObjects() {
          {"access", "read"},
          {"note", "Default counts/rev reference"}},
     });
+}
+
+json loadObjectDictionaryFromEds(const std::string& path) {
+    json objects = json::array();
+    for (const auto& [section_name, fields] : readEdsSections(path)) {
+        uint16_t index = 0;
+        uint8_t subindex = 0;
+        if (!parseEdsSectionName(section_name, index, subindex)) {
+            continue;
+        }
+        const auto name_it = fields.find("ParameterName");
+        const auto type_it = fields.find("DataType");
+        const auto access_it = fields.find("AccessType");
+        if (name_it == fields.end() || type_it == fields.end() || access_it == fields.end()) {
+            continue;
+        }
+
+        const auto pdo_it = fields.find("PDOMapping");
+        const auto default_it = fields.find("DefaultValue");
+        const auto ui_type = dataTypeToUiType(type_it->second);
+        objects.push_back({
+            {"name", name_it->second},
+            {"index", hexValue(index, 4)},
+            {"subindex", subindex},
+            {"type", ui_type},
+            {"data_type", dataTypeName(type_it->second)},
+            {"access", access_it->second},
+            {"pdo_mapping", pdo_it != fields.end() && pdo_it->second != "0"},
+            {"default", default_it != fields.end() ? default_it->second : ""},
+            {"category", objectCategory(index)},
+            {"note",
+             ui_type == "unsupported"
+                 ? "Listed from EDS/manual, but this simple UI only reads/writes integer objects"
+                 : "Listed from EYou RP EDS object dictionary"},
+        });
+    }
+    if (objects.empty()) {
+        throw std::runtime_error("EDS object dictionary did not contain readable object entries");
+    }
+    return objects;
+}
+
+std::string edsPathFromSummary(const std::string& summary_path) {
+    std::ifstream file(summary_path);
+    if (!file) {
+        return "generated/canopen/euservo_rp/euservo_rp.normalized.eds";
+    }
+    const auto summary = json::parse(file);
+    return summary.value("normalized_eds",
+                         "generated/canopen/euservo_rp/euservo_rp.normalized.eds");
 }
 
 struct HttpRequest {
@@ -569,16 +733,18 @@ const char* indexHtml() {
       <p class="note">Send the operation mode before enabling or before the first setpoint. The drive can reject runtime mode writes depending on state; the daemon reports that SDO error instead of hiding it.</p>
     </section>
     <section class="card">
-      <h2>Read / Write Object</h2>
+      <h2>Object Dictionary</h2>
+      <div class="row"><label>Search register</label><input id="objectSearch" placeholder="6064, velocity, encoder..." oninput="renderObjectOptions()"></div>
       <div class="row"><label>Common object</label><select id="commonObjects" onchange="pickObject()"></select></div>
       <div class="row"><label>Index</label><input id="index" value="0x6064"></div>
       <div class="row"><label>Subindex</label><input id="subindex" value="0"></div>
-      <div class="row"><label>Type</label><select id="type"><option>i32</option><option>u32</option><option>i16</option><option>u16</option><option>i8</option><option>u8</option></select></div>
+      <div class="row"><label>Type</label><select id="type"><option>i32</option><option>u32</option><option>i16</option><option>u16</option><option>i8</option><option>u8</option><option>unsupported</option></select></div>
       <div class="row"><label>Write value</label><input id="writeValue" value="0"></div>
       <div class="actions">
         <button onclick="sdoRead()">Read</button>
         <button class="warn" onclick="sdoWrite()">Write</button>
       </div>
+      <p id="objectInfo" class="note">Object dictionary entries are loaded from the EYou RP EDS generated from the vendor data/manual.</p>
       <p class="note">On this RP firmware, target/controlword objects are PDO driven once mapped; use Motion and Enable controls for those instead of manual SDO writes.</p>
     </section>
     <section class="card">
@@ -657,10 +823,20 @@ const char* indexHtml() {
         $('status').innerHTML = metric('Server', error.message, 'bad');
       }
     }
+    function objectMatches(o, q) {
+      if (!q) return true;
+      const text = `${o.index} ${o.subindex} ${o.name} ${o.access} ${o.data_type} ${o.category}`.toLowerCase();
+      return text.includes(q);
+    }
+    function renderObjectOptions() {
+      const q = $('objectSearch').value.trim().toLowerCase();
+      const visible = objects.map((o, i) => ({o, i})).filter(x => objectMatches(x.o, q)).slice(0, 300);
+      $('commonObjects').innerHTML = visible.map(({o, i}) => `<option value="${i}">${o.index}:${o.subindex} ${o.name} [${o.access}, ${o.data_type}]</option>`).join('');
+      pickObject();
+    }
     async function loadObjects() {
       objects = (await api('/api/objects')).objects;
-      $('commonObjects').innerHTML = objects.map((o, i) => `<option value="${i}">${o.index}:${o.subindex} ${o.name}</option>`).join('');
-      pickObject();
+      renderObjectOptions();
     }
     function pickObject() {
       const o = objects[Number($('commonObjects').value)];
@@ -668,6 +844,7 @@ const char* indexHtml() {
       $('index').value = o.index;
       $('subindex').value = o.subindex;
       $('type').value = o.type;
+      $('objectInfo').textContent = `${o.name} | ${o.category} | access=${o.access} | data=${o.data_type} | PDO=${o.pdo_mapping ? 'yes' : 'no'} | default=${o.default || '-'} | ${o.note || ''}`;
     }
     function log(value) { $('log').textContent = JSON.stringify(value, null, 2); }
     loadObjects().then(refresh);
@@ -743,8 +920,10 @@ void checkPositionStep(int64_t current, int64_t target, int32_t max_step) {
 
 class CommissioningApi {
 public:
-    CommissioningApi(DriveMap drives, int32_t max_position_step)
-        : drives_(std::move(drives)), max_position_step_(max_position_step) {
+    CommissioningApi(DriveMap drives, int32_t max_position_step, json object_catalog)
+        : drives_(std::move(drives)),
+          max_position_step_(max_position_step),
+          object_catalog_(std::move(object_catalog)) {
         if (drives_.empty()) {
             throw std::invalid_argument("CommissioningApi requires at least one drive");
         }
@@ -759,7 +938,7 @@ public:
                 return jsonResponse(allFeedbackJson(drives_));
             }
             if (request.method == "GET" && request.path == "/api/objects") {
-                return jsonResponse({{"ok", true}, {"objects", commonObjects()}});
+                return jsonResponse({{"ok", true}, {"objects", object_catalog_}});
             }
             if (request.method != "POST") {
                 return errorResponse(404, "unknown endpoint");
@@ -890,6 +1069,7 @@ private:
 
     DriveMap drives_;
     int32_t max_position_step_;
+    json object_catalog_;
 };
 
 }  // namespace
@@ -901,12 +1081,13 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> node_ids;
 
     std::string host{"127.0.0.1"};
+    std::string eds_path;
     uint16_t port = 8765;
 
     const auto print_usage = [] {
         std::cerr << "usage: stablecops_commissiond [--host 127.0.0.1] [--port 8765] "
                      "[--can can0] [--dcf dcf/master.dcf] "
-                     "[--summary generated/.../<name>.summary.json] "
+                     "[--summary generated/.../<name>.summary.json] [--eds path] "
                      "[--master-node 127] [--node 1] [--nodes 1,2,3] "
                      "[--mode csp|csv|cst|pp|pv|pt] "
                      "[--profile-velocity n] [--profile-accel n] [--profile-decel n] "
@@ -929,6 +1110,8 @@ int main(int argc, char** argv) {
                 config.master_dcf_path = argv[++i];
             } else if (arg == "--summary" && i + 1 < argc) {
                 config.summary_path = argv[++i];
+            } else if (arg == "--eds" && i + 1 < argc) {
+                eds_path = argv[++i];
             } else if (arg == "--master-node" && i + 1 < argc) {
                 config.master_node_id = static_cast<uint8_t>(parseUnsignedText(argv[++i], 127));
             } else if (arg == "--node" && i + 1 < argc) {
@@ -988,6 +1171,18 @@ int main(int argc, char** argv) {
         if (node_ids.empty()) {
             node_ids.push_back(config.node_id);
         }
+        if (eds_path.empty()) {
+            eds_path = edsPathFromSummary(config.summary_path);
+        }
+
+        json object_catalog;
+        try {
+            object_catalog = loadObjectDictionaryFromEds(eds_path);
+        } catch (const std::exception& exception) {
+            std::cerr << "warning: " << exception.what()
+                      << "; falling back to built-in commissioning object list\n";
+            object_catalog = builtinObjects();
+        }
 
         std::cout << "stableCOPS commissioning daemon\n"
                   << "CAN interface: " << config.can_interface << '\n'
@@ -999,7 +1194,9 @@ int main(int argc, char** argv) {
                   << "Mode at boot: " << stablecops::ds402::toString(*config.operation_mode) << '\n'
                   << "Monitor on boot: yes\n"
                   << "Master DCF: " << config.master_dcf_path << '\n'
-                  << "PDO summary: " << config.summary_path << '\n';
+                  << "PDO summary: " << config.summary_path << '\n'
+                  << "Object dictionary: " << eds_path << " (" << object_catalog.size()
+                  << " entries)\n";
 
         std::vector<std::unique_ptr<stablecops::app::MotorDrive>> drives;
         DriveMap drive_map;
@@ -1012,7 +1209,7 @@ int main(int argc, char** argv) {
         }
         drives.front()->start();
 
-        CommissioningApi api(drive_map, config.max_position_step);
+        CommissioningApi api(drive_map, config.max_position_step, object_catalog);
         HttpServer server(host, port, api);
         server.run();
         return EXIT_SUCCESS;

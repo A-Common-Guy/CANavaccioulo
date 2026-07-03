@@ -86,7 +86,10 @@ the object panel for parameters or diagnostics. The UI has a separate **Send
 Mode (0x6060)** action; use it before enabling or before sending the first
 setpoint, then confirm the displayed mode in the status panel. When several
 nodes are passed, the daemon boots them on one shared bus/SYNC and the browser's
-target-node selector chooses which drive receives commands.
+target-node selector chooses which drive receives commands. The object panel
+loads the generated normalized EDS (`--eds` to override) so you can search the
+available EYou RP registers from the vendor data/manual, including access type,
+PDO mapping, data type, and default value.
 
 Enable and hold the current CSP position:
 
@@ -269,6 +272,13 @@ to energise + hold both joints; `--rt --rt-cpu N` for a real-time loop):
 ```bash
 build/examples/multi_drive --can can0 --nodes 1,2 --seconds 10
 ```
+
+At 1 Mbit/s classic CAN, two drives at a 1 ms SYNC with this cyclic superset
+layout are already close to the practical bus limit: SYNC + 4 feedback TPDOs +
+up to 4 command RPDOs per millisecond, before SDO traffic. If SocketCAN reports
+`CAN transmit queue full`, first bring the interface up with the repo `canup.sh`
+(sets `txqueuelen 1000`), then slow the generated profile (`master.sync_period`,
+for example `2000` us) or reduce mapped PDO traffic before adding more nodes.
 
 ## Linting & formatting
 
