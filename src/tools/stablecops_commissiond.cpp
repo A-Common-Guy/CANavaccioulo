@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,9 +35,15 @@ namespace {
 
 using json = nlohmann::json;
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<bool> g_stop_requested{false};
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<unsigned> g_signal_count{0};
+
+constexpr auto kForcedShutdownExitDelay = std::chrono::milliseconds{750};
 
 void handleSignal(int /*signal*/) {
+    g_signal_count.fetch_add(1, std::memory_order_relaxed);
     g_stop_requested.store(true);
 }
 
@@ -1207,11 +1214,61 @@ int main(int argc, char** argv) {
             drive_map[node_id] = drive.get();
             drives.push_back(std::move(drive));
         }
-        drives.front()->start();
 
-        CommissioningApi api(drive_map, config.max_position_step, object_catalog);
-        HttpServer server(host, port, api);
-        server.run();
+        std::atomic<bool> force_watcher_done{false};
+        std::thread force_watcher([&] {
+            bool logged = false;
+            bool force_sent = false;
+            auto force_sent_at = std::chrono::steady_clock::time_point{};
+            while (!force_watcher_done.load(std::memory_order_acquire)) {
+                const auto signals = g_signal_count.load(std::memory_order_relaxed);
+                if (signals >= 3) {
+                    std::cerr << "\nthird signal; exiting immediately\n";
+                    std::_Exit(128 + SIGINT);
+                }
+                if (signals >= 2) {
+                    if (!logged) {
+                        std::cerr << "\nsecond signal; forcing CANopen bus shutdown\n";
+                        logged = true;
+                    }
+                    if (!force_sent) {
+                        force_sent = drives.front()->forceStopBus();
+                        if (force_sent) {
+                            force_sent_at = std::chrono::steady_clock::now();
+                        }
+                    } else if (std::chrono::steady_clock::now() - force_sent_at >=
+                               kForcedShutdownExitDelay) {
+                        std::cerr << "forced CANopen shutdown did not complete; exiting process\n";
+                        std::_Exit(128 + SIGINT);
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            }
+        });
+        const auto stop_force_watcher = [&] {
+            force_watcher_done.store(true, std::memory_order_release);
+            if (force_watcher.joinable()) {
+                force_watcher.join();
+            }
+        };
+
+        try {
+            drives.front()->start();
+
+            CommissioningApi api(drive_map, config.max_position_step, object_catalog);
+            HttpServer server(host, port, api);
+            server.run();
+            if (g_stop_requested.load(std::memory_order_acquire)) {
+                std::cout << "shutdown requested; disabling drives and stopping bus...\n";
+            }
+            drives.front()->shutdownBus();
+            stop_force_watcher();
+        } catch (...) {
+            drives.front()->forceStopBus();
+            drives.front()->shutdownBus();
+            stop_force_watcher();
+            throw;
+        }
         return EXIT_SUCCESS;
     } catch (const std::exception& exception) {
         std::cerr << "stablecops_commissiond: " << exception.what() << '\n';

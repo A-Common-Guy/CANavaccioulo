@@ -53,6 +53,16 @@ public:
     // De-energise a single node (graceful stop) without tearing the bus down.
     void stopNode(uint8_t node_id);
 
+    // Graceful-stop every drive and join the loop thread. Idempotent; normally
+    // reached from teardown, but tools can call it explicitly to keep signal
+    // handling alive while the shutdown completes.
+    void shutdown();
+
+    // Immediate escape hatch for a stuck graceful shutdown. This stops the Lely
+    // context/loop directly; the caller still owns joining through shutdown().
+    // Returns false if the application has not been constructed yet.
+    bool forceStop();
+
     bool running() const;
 
     // Route a call to a node's MotorDriver on the loop thread. No-op if the bus
@@ -75,9 +85,6 @@ private:
 
     // Validate that config's bus-level fields match this bus; throws otherwise.
     void validateBusMatch(const MotorConfig& config) const;
-    // Graceful-stop every drive and join the loop thread (called on teardown).
-    void shutdown();
-
     std::string interface_;
     // Bus-level fields snapshot from the first drive, used to validate siblings.
     MotorConfig bus_template_;

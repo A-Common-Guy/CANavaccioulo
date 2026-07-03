@@ -46,6 +46,12 @@ public:
     // bus is torn down when the last MotorDrive on the interface is destroyed.
     void stop();
 
+    // Tooling-oriented controls for the shared bus. shutdownBus() gracefully
+    // tears down the whole chain; forceStopBus() breaks a stuck graceful
+    // shutdown by stopping the CANopen loop immediately.
+    void shutdownBus();
+    bool forceStopBus();
+
     bool running() const;
 
     // Latest feedback snapshot, safe to call from any thread. feedbackLive() is

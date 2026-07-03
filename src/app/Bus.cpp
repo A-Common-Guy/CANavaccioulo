@@ -151,6 +151,14 @@ void Bus::shutdown() {
     running_.store(false);
 }
 
+bool Bus::forceStop() {
+    if (auto* app = app_.load(std::memory_order_acquire)) {
+        app->stop();
+        return true;
+    }
+    return false;
+}
+
 void Bus::stopNode(uint8_t node_id) {
     postToDriver(node_id,
                  [](stablecops::lely::MotorDriver& motor) { motor.requestGracefulStop(); });

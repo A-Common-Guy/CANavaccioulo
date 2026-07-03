@@ -31,6 +31,19 @@ void MotorDrive::stop() {
     }
 }
 
+void MotorDrive::shutdownBus() {
+    if (bus_) {
+        bus_->shutdown();
+    }
+}
+
+bool MotorDrive::forceStopBus() {
+    if (bus_) {
+        return bus_->forceStop();
+    }
+    return false;
+}
+
 bool MotorDrive::running() const {
     return bus_ && bus_->running();
 }
