@@ -31,6 +31,15 @@ struct BootActionConfig {
     std::optional<uint32_t> profile_acceleration;
     std::optional<uint32_t> profile_deceleration;
     std::optional<uint32_t> torque_slope;
+    // Vendor "Disable Mode" (0x2103), written over SDO at boot when set. Selects
+    // the power-stage behaviour on disable (coast/high-impedance vs short-circuit
+    // dynamic braking); concrete values are drive-specific.
+    std::optional<uint8_t> disable_mode;
+    // Ad-hoc raw object writes applied over SDO at boot (pre-operational), in
+    // order, for drive configuration/experimentation.
+    std::vector<ds402::ObjectWrite> object_writes;
+    // Persist the configuration objects written at boot to NVM (0x1010:03).
+    bool save_params{false};
     std::optional<int32_t> csp_target_position;
     std::optional<int32_t> csp_relative_move;
     int32_t max_position_step{10000};

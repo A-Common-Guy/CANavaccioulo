@@ -35,6 +35,9 @@ stablecops::lely::BootActionConfig makeBootActions(const MotorConfig& config) {
     actions.profile_acceleration = config.profile_acceleration;
     actions.profile_deceleration = config.profile_deceleration;
     actions.torque_slope = config.torque_slope;
+    actions.disable_mode = config.disable_mode;
+    actions.object_writes = config.object_writes;
+    actions.save_params = config.save_params;
     actions.csp_target_position = config.csp_target_position;
     actions.csp_relative_move = config.csp_relative_move;
     actions.max_position_step = config.max_position_step;

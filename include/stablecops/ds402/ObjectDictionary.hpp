@@ -27,6 +27,11 @@ constexpr uint32_t store_parameters_signature = 0x65766173;  // ASCII "save"
 
 constexpr uint16_t set_current_position_zero = 0x2262;
 
+// Vendor "Disable Mode" (0x2103): selects what the power stage does when the
+// drive leaves Operation Enabled (e.g. coast/high-impedance vs short-circuit
+// dynamic braking). The concrete enum values are drive-specific.
+constexpr uint16_t disable_mode = 0x2103;
+
 constexpr uint8_t default_subindex = 0x00;
 
 }  // namespace stablecops::ds402::od

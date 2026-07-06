@@ -137,6 +137,14 @@ if(STABLECOPS_BUILD_ECAT)
     set_target_properties(motion_faster_can_move PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
     target_link_libraries(motion_faster_can_move PRIVATE ecat_core stablecops)
+
+    # Validation: replay a recorded joint trajectory on the two CAN drives (CSP)
+    # while logging the foot pitch/roll measured by the two EtherCAT encoders
+    # against the expected pitch/roll from the trajectory CSV.
+    add_executable(validate_trajectory examples/validate_trajectory.cpp)
+    set_target_properties(validate_trajectory PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
+    target_link_libraries(validate_trajectory PRIVATE ecat_core stablecops)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -549,6 +549,81 @@ std::error_code MotorDriver::configureProfileParameters() noexcept {
     if (!write(boot_actions_.torque_slope, ds402::od::torque_slope, "torque slope")) {
         return ec;
     }
+
+    // Vendor "Disable Mode" (0x2103) is a single-byte object, so it must be
+    // written as u8 (a u32 download aborts on length mismatch). Selects the
+    // power-stage behaviour on disable (coast vs short-circuit braking).
+    if (boot_actions_.disable_mode) {
+        Wait(AsyncWrite(ds402::od::disable_mode, ds402::od::default_subindex,
+                        static_cast<uint8_t>(*boot_actions_.disable_mode)),
+             ec);
+        if (ec) {
+            stablecops::log::err() << "  SDO write to disable mode (0x2103:00) failed: "
+                                   << ec.message() << '\n';
+            return ec;
+        }
+        stablecops::log::out() << "  disable mode (0x2103) set to "
+                               << static_cast<int>(*boot_actions_.disable_mode) << '\n';
+    }
+
+    // Ad-hoc raw object writes (experimentation / drive configuration). Each is
+    // downloaded with the requested CANopen width so single-byte objects are not
+    // rejected by a wrong-length download.
+    for (const auto& object : boot_actions_.object_writes) {
+        switch (object.width) {
+            case ds402::ObjectWidth::U8:
+                Wait(AsyncWrite(object.index, object.subindex,
+                                static_cast<uint8_t>(object.value)), ec);
+                break;
+            case ds402::ObjectWidth::U16:
+                Wait(AsyncWrite(object.index, object.subindex,
+                                static_cast<uint16_t>(object.value)), ec);
+                break;
+            case ds402::ObjectWidth::U32:
+                Wait(AsyncWrite(object.index, object.subindex,
+                                static_cast<uint32_t>(object.value)), ec);
+                break;
+            case ds402::ObjectWidth::I8:
+                Wait(AsyncWrite(object.index, object.subindex,
+                                static_cast<int8_t>(object.value)), ec);
+                break;
+            case ds402::ObjectWidth::I16:
+                Wait(AsyncWrite(object.index, object.subindex,
+                                static_cast<int16_t>(object.value)), ec);
+                break;
+            case ds402::ObjectWidth::I32:
+                Wait(AsyncWrite(object.index, object.subindex,
+                                static_cast<int32_t>(object.value)), ec);
+                break;
+        }
+        if (ec) {
+            stablecops::log::err() << "  SDO write to ";
+            writeHex(stablecops::log::err(), object.index, 4)
+                << ':' << std::setw(2) << std::setfill('0') << std::uppercase << std::hex
+                << static_cast<int>(object.subindex) << std::dec
+                << " failed: " << ec.message() << '\n';
+            return ec;
+        }
+        stablecops::log::out() << "  object ";
+        writeHex(stablecops::log::out(), object.index, 4)
+            << ':' << std::setw(2) << std::setfill('0') << std::uppercase << std::hex
+            << static_cast<int>(object.subindex) << std::dec << " set to " << object.value
+            << '\n';
+    }
+
+    // Persist the objects just written so a value that the drive only honours out
+    // of NVM (or that must survive a power cycle) takes effect. Saves all
+    // application parameters (0x1010:03).
+    if (boot_actions_.save_params) {
+        try {
+            drive_.storeApplicationParameters();
+        } catch (const std::exception& exception) {
+            stablecops::log::err() << "  saving application parameters to NVM failed: "
+                                   << exception.what() << '\n';
+            return std::make_error_code(std::errc::io_error);
+        }
+        stablecops::log::out() << "  application parameters saved to NVM (0x1010:03)\n";
+    }
     return {};
 }
 
@@ -993,8 +1068,12 @@ bool MotorDriver::wantsMotionAction() const {
 
 bool MotorDriver::wantsCyclicConfig() const {
     // PDO reconfiguration (transmission type 1) is needed both to command the
-    // drive and to merely observe its feedback cyclically.
-    return wantsMotionAction() || boot_actions_.monitor;
+    // drive and to merely observe its feedback cyclically. A boot-time parameter
+    // write (disable mode) or NVM save also needs the pre-operational config
+    // window even when no cyclic exchange is requested.
+    return wantsMotionAction() || boot_actions_.monitor ||
+           boot_actions_.disable_mode.has_value() || !boot_actions_.object_writes.empty() ||
+           boot_actions_.save_params;
 }
 
 void MotorDriver::runBootActions() noexcept {

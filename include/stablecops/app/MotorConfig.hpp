@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "stablecops/app/RealtimeScheduling.hpp"
+#include "stablecops/ds402/ObjectAccess.hpp"
 #include "stablecops/ds402/State.hpp"
 
 namespace stablecops::app {
@@ -43,6 +45,13 @@ struct MotorConfig {
     std::optional<uint32_t> profile_acceleration;
     std::optional<uint32_t> profile_deceleration;
     std::optional<uint32_t> torque_slope;
+    // Vendor "Disable Mode" (0x2103) written over SDO at boot when set; selects
+    // coast/high-impedance vs short-circuit dynamic braking on disable.
+    std::optional<uint8_t> disable_mode;
+    // Ad-hoc raw object writes applied over SDO at boot, in order.
+    std::vector<ds402::ObjectWrite> object_writes;
+    // Persist boot-time parameter writes to NVM (0x1010:03).
+    bool save_params{false};
     std::optional<int32_t> csp_target_position;
     std::optional<int32_t> csp_relative_move;
     int32_t max_position_step{10000};

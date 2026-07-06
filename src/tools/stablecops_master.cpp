@@ -12,6 +12,7 @@
 #include "stablecops/app/CanopenApplication.hpp"
 #include "stablecops/app/MotorConfig.hpp"
 #include "stablecops/app/RealtimeScheduling.hpp"
+#include "stablecops/ds402/ObjectAccess.hpp"
 #include "stablecops/ds402/State.hpp"
 
 namespace {
@@ -53,6 +54,43 @@ std::optional<std::vector<uint8_t>> parseNodeList(const std::string& spec) {
     return nodes;
 }
 
+// Parse a raw SDO-write spec "index:sub:type=value", e.g. "0x605C:0:i16=0".
+// index/sub/value accept 0x-prefixed hex or decimal; type is one of
+// u8,u16,u32,i8,i16,i32.
+std::optional<stablecops::ds402::ObjectWrite> parseObjectWrite(const std::string& spec) {
+    using stablecops::ds402::ObjectWidth;
+    const auto eq = spec.find('=');
+    const auto colon1 = spec.find(':');
+    if (eq == std::string::npos || colon1 == std::string::npos || colon1 > eq) {
+        return std::nullopt;
+    }
+    const auto colon2 = spec.find(':', colon1 + 1);
+    if (colon2 == std::string::npos || colon2 > eq) {
+        return std::nullopt;
+    }
+    const std::string index_str = spec.substr(0, colon1);
+    const std::string sub_str = spec.substr(colon1 + 1, colon2 - colon1 - 1);
+    const std::string type_str = spec.substr(colon2 + 1, eq - colon2 - 1);
+    const std::string value_str = spec.substr(eq + 1);
+
+    stablecops::ds402::ObjectWrite write;
+    try {
+        write.index = static_cast<uint16_t>(std::stoul(index_str, nullptr, 0));
+        write.subindex = static_cast<uint8_t>(std::stoul(sub_str, nullptr, 0));
+        write.value = static_cast<int64_t>(std::stoll(value_str, nullptr, 0));
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (type_str == "u8") write.width = ObjectWidth::U8;
+    else if (type_str == "u16") write.width = ObjectWidth::U16;
+    else if (type_str == "u32") write.width = ObjectWidth::U32;
+    else if (type_str == "i8") write.width = ObjectWidth::I8;
+    else if (type_str == "i16") write.width = ObjectWidth::I16;
+    else if (type_str == "i32") write.width = ObjectWidth::I32;
+    else return std::nullopt;
+    return write;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -67,7 +105,8 @@ int main(int argc, char** argv) {
                      "[--inspect] [--monitor] [--enable] "
                      "[--mode csp|csv|cst|pp|pv|pt] "
                      "[--profile-velocity n] [--profile-accel n] [--profile-decel n] "
-                     "[--torque-slope n] "
+                     "[--torque-slope n] [--disable-mode n] "
+                     "[--set index:sub:type=value] [--save] "
                      "[--hold-position] [--csp-target counts] [--csp-relative counts] "
                      "[--max-position-step counts] [--feedback-timeout ms] "
                      "[--counts-per-rev n] [--sync-period-us 1000] "
@@ -107,6 +146,20 @@ int main(int argc, char** argv) {
             config.profile_deceleration = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--torque-slope" && i + 1 < argc) {
             config.torque_slope = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--disable-mode" && i + 1 < argc) {
+            config.disable_mode = static_cast<uint8_t>(std::stoul(argv[++i]));
+        } else if (arg == "--set" && i + 1 < argc) {
+            const std::string spec = argv[++i];
+            const auto write = parseObjectWrite(spec);
+            if (!write) {
+                std::cerr << "invalid --set '" << spec
+                          << "' (expected index:sub:type=value, e.g. 0x605C:0:i16=0)\n";
+                print_usage();
+                return EXIT_FAILURE;
+            }
+            config.object_writes.push_back(*write);
+        } else if (arg == "--save") {
+            config.save_params = true;
         } else if (arg == "--can" && i + 1 < argc) {
             config.can_interface = argv[++i];
         } else if (arg == "--dcf" && i + 1 < argc) {
@@ -194,6 +247,12 @@ int main(int argc, char** argv) {
                       : std::string("persisted (unchanged)"))
               << '\n'
               << "Hold position: " << (config.hold_position_on_boot ? "yes" : "no") << '\n'
+              << "Disable mode (0x2103): "
+              << (config.disable_mode ? std::to_string(static_cast<int>(*config.disable_mode))
+                                      : std::string("persisted (unchanged)"))
+              << '\n'
+              << "Raw object writes: " << config.object_writes.size() << '\n'
+              << "Save params to NVM: " << (config.save_params ? "yes" : "no") << '\n'
               << "Max position step: " << config.max_position_step << " counts\n"
               << "Feedback timeout: " << config.feedback_timeout.count() << " ms"
               << (config.feedback_timeout.count() == 0 ? " (watchdog disabled)" : "") << '\n'
