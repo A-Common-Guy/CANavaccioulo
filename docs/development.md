@@ -130,6 +130,41 @@ build/examples/pt_torque            --can can0 --node 1 --torque 0 --torque-slop
 build/examples/multi_drive          --can can0 --nodes 1,2 --seconds 10   # add --enable to energise + hold
 ```
 
+## EtherCAT + CAN (motion-faster)
+
+The repo vendors the EtherCAT library [`motion-faster`](../mm/motion-faster) so a
+single program can read EtherCAT drives while stableCOPS moves CAN motors. It is
+**off by default** (it pulls SOEM + yaml-cpp via FetchContent and needs CMake
+>= 3.28). Enable it explicitly:
+
+```bash
+cmake --preset default -DSTABLECOPS_BUILD_ECAT=ON
+cmake --build --preset default
+```
+
+This builds `motion-faster`'s `ecat_core` library plus two examples:
+
+| Example | What it shows |
+| --- | --- |
+| [`motion_faster_encoder`](../examples/motion_faster_encoder.cpp) | Print the auxiliary (load) encoder (CoE `0x2033`) of every EtherCAT drive |
+| [`motion_faster_can_move`](../examples/motion_faster_can_move.cpp) | Read EtherCAT encoders while moving a CAN motor (CSV) - the two stacks run on separate threads |
+
+```bash
+# EtherCAT read only (scan mode auto-detects the drives):
+sudo build/examples/motion_faster_encoder enp0s31f6
+
+# EtherCAT read + CAN motion (default --velocity 0 holds; nonzero SPINS the motor):
+sudo ./canup.sh
+sudo build/examples/motion_faster_can_move \
+    --ecat enp0s31f6 --can can0 --node 1 --velocity 0 --seconds 30
+```
+
+The EtherCAT master (`MasterRuntime`) owns its own RT thread and installs the
+SIGINT handler; the CAN side is a normal `MotorDrive` on its shared bus thread.
+Ctrl-C ends the loop and the CAN drive is de-energised on exit. EtherCAT needs a
+raw NIC (run as root / `CAP_NET_RAW`); CAN needs SocketCAN up and CAN
+privileges, exactly as for the other examples.
+
 ## Real-time loop (latency / jitter)
 
 The bus loop thread can be tuned for deterministic cadence. It is opt-in and

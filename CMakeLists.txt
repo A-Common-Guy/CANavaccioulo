@@ -17,6 +17,18 @@ message(STATUS "Lely CANopen dependency found through pkg-config: liblely-coapp"
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+# When stableCOPS is the top-level project we build everything and install by
+# default; when it is pulled into another build (add_subdirectory / FetchContent)
+# only the library is built unless the parent opts back in.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(STABLECOPS_TOPLEVEL ON)
+else()
+    set(STABLECOPS_TOPLEVEL OFF)
+endif()
+option(STABLECOPS_BUILD_TOOLS "Build the stableCOPS CLI tools" ${STABLECOPS_TOPLEVEL})
+option(STABLECOPS_BUILD_EXAMPLES "Build the stableCOPS examples" ${STABLECOPS_TOPLEVEL})
+option(STABLECOPS_INSTALL "Generate stableCOPS install and CMake-package rules" ${STABLECOPS_TOPLEVEL})
+
 # ---------------------------------------------------------------------------
 # The library: one shared object that consumers link against.
 #
@@ -61,43 +73,78 @@ set_target_properties(stablecops PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
-# In-tree tools and examples.
+# In-tree tools and examples (skipped by default when embedded as a subproject).
 # ---------------------------------------------------------------------------
-add_executable(stablecops_master src/tools/stablecops_master.cpp)
-# The master tool uses the advanced CanopenApplication API, whose header still
-# exposes Lely types, so it needs the Lely include path directly (unlike the
-# MotorDrive-based examples below).
-target_link_libraries(stablecops_master PRIVATE stablecops PkgConfig::LELY_COAPP)
+if(STABLECOPS_BUILD_TOOLS)
+    add_executable(stablecops_master src/tools/stablecops_master.cpp)
+    # The master tool uses the advanced CanopenApplication API, whose header
+    # still exposes Lely types, so it needs the Lely include path directly
+    # (unlike the MotorDrive-based examples below).
+    target_link_libraries(stablecops_master PRIVATE stablecops PkgConfig::LELY_COAPP)
 
-add_executable(stablecops_commissiond src/tools/stablecops_commissiond.cpp)
-target_include_directories(stablecops_commissiond PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-target_link_libraries(stablecops_commissiond PRIVATE stablecops)
+    add_executable(stablecops_commissiond src/tools/stablecops_commissiond.cpp)
+    target_include_directories(stablecops_commissiond PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+    target_link_libraries(stablecops_commissiond PRIVATE stablecops)
+endif()
 
-# Every example uses only the Lely-free MotorDrive API.
-set(STABLECOPS_EXAMPLES
-    pdo_feedback_monitor
-    enable_and_hold
-    csp_position
-    csv_velocity
-    cst_torque
-    pp_move
-    pv_velocity
-    pt_torque
-    multi_drive
-)
-foreach(example ${STABLECOPS_EXAMPLES})
-    add_executable(${example} examples/${example}.cpp)
-    set_target_properties(${example} PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+if(STABLECOPS_BUILD_EXAMPLES)
+    # Every example uses only the Lely-free MotorDrive API.
+    set(STABLECOPS_EXAMPLES
+        pdo_feedback_monitor
+        enable_and_hold
+        csp_position
+        csv_velocity
+        cst_torque
+        pp_move
+        pv_velocity
+        pt_torque
+        multi_drive
+        zero_leg
     )
-    target_link_libraries(${example} PRIVATE stablecops)
-endforeach()
+    foreach(example ${STABLECOPS_EXAMPLES})
+        add_executable(${example} examples/${example}.cpp)
+        set_target_properties(${example} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+        )
+        target_link_libraries(${example} PRIVATE stablecops)
+    endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
+# Optional EtherCAT integration (the vendored motion-faster library), for mixed
+# CAN + EtherCAT applications - e.g. reading EtherCAT encoders while moving CAN
+# motors. Off by default because motion-faster pulls SOEM + yaml-cpp over the
+# network via FetchContent and requires CMake >= 3.28 (its own floor).
+# Enable with: cmake --preset default -DSTABLECOPS_BUILD_ECAT=ON
+# ---------------------------------------------------------------------------
+option(STABLECOPS_BUILD_ECAT "Build the EtherCAT (motion-faster) examples" OFF)
+
+if(STABLECOPS_BUILD_ECAT)
+    # Build only motion-faster's library (ecat_core), not its own examples.
+    set(MOTION_FASTER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    add_subdirectory(mm/motion-faster)
+
+    # EtherCAT-only: print the auxiliary (load) encoder of every EtherCAT drive.
+    add_executable(motion_faster_encoder examples/motion_faster_encoder.cpp)
+    set_target_properties(motion_faster_encoder PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
+    target_link_libraries(motion_faster_encoder PRIVATE ecat_core)
+
+    # Combined: read EtherCAT encoders (motion-faster) while moving a CAN motor
+    # (stableCOPS MotorDrive), both on their own RT/loop threads.
+    add_executable(motion_faster_can_move examples/motion_faster_can_move.cpp)
+    set_target_properties(motion_faster_can_move PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
+    target_link_libraries(motion_faster_can_move PRIVATE ecat_core stablecops)
+endif()
 
 # ---------------------------------------------------------------------------
 # Install + CMake package export, so a consumer can:
 #   find_package(stableCOPS REQUIRED)
 #   target_link_libraries(app PRIVATE stableCOPS::stablecops)
 # ---------------------------------------------------------------------------
+if(STABLECOPS_INSTALL)
 install(TARGETS stablecops
     EXPORT stableCOPSTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -141,3 +188,4 @@ install(DIRECTORY
         ${CMAKE_CURRENT_SOURCE_DIR}/config
     DESTINATION ${CMAKE_INSTALL_DATADIR}/stablecops
 )
+endif()  # STABLECOPS_INSTALL

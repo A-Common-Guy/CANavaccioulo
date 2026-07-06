@@ -7,26 +7,61 @@ faults, and shutdown behind one thread-safe handle: **`MotorDrive`**.
 - **Development, CLI tools, examples, tuning:** [`docs/development.md`](docs/development.md)
 - **EDS -> DCF data pipeline:** [`docs/canopen_motor_pipeline.md`](docs/canopen_motor_pipeline.md)
 
-## Install
+## Use it in another project
+
+Prerequisite on any machine that builds or runs it:
 
 ```bash
-sudo apt-get install pkg-config liblely-coapp-dev liblely-co-tools python3-dcf-tools
+sudo apt-get install pkg-config liblely-coapp-dev
+```
+
+Then pick one of the following. In all cases you link a single target and the
+public API needs no Lely or pkg-config on the consumer side:
+
+```cmake
+target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
+```
+
+**A) Install once, then `find_package` (recommended).**
+
+```bash
+# In the stableCOPS checkout:
 cmake --preset default
 cmake --build --preset default
 cmake --install build --prefix /your/prefix     # sudo for a system prefix
 ```
 
-Consume it from CMake (no Lely or pkg-config needed on the consumer side - the
-public API is dependency-clean):
-
 ```cmake
+# In your project (add -DCMAKE_PREFIX_PATH=/your/prefix if not a system prefix):
 find_package(stableCOPS REQUIRED)
 target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
 ```
 
+**B) Vendor the source and `add_subdirectory`.** Embedded builds only the
+library (tools/examples/install are skipped unless you opt in with
+`-DSTABLECOPS_BUILD_TOOLS=ON` etc.).
+
+```cmake
+add_subdirectory(third_party/stableCOPS)
+target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
+```
+
+**C) Pull it with `FetchContent`.**
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(stableCOPS
+    GIT_REPOSITORY <your-repo-url>
+    GIT_TAG        main)
+FetchContent_MakeAvailable(stableCOPS)
+target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
+```
+
 At runtime the target needs `liblely-coapp` installed (recorded as a `NEEDED`
-dependency of `libstablecops.so`), SocketCAN up (`sudo ./canup.sh`), and CAN
-privileges (root or `CAP_NET_ADMIN`).
+dependency of `libstablecops.so`), SocketCAN up (`sudo ./canup.sh`), CAN
+privileges (root or `CAP_NET_ADMIN`), and the generated DCF/summary files
+reachable at the paths set in `MotorConfig` (installed samples live under
+`share/stablecops/`).
 
 ## The interface: `MotorDrive`
 
