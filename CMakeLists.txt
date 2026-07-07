@@ -100,7 +100,6 @@ if(STABLECOPS_BUILD_EXAMPLES)
         pv_velocity
         pt_torque
         multi_drive
-        zero_leg
     )
     foreach(example ${STABLECOPS_EXAMPLES})
         add_executable(${example} examples/${example}.cpp)
@@ -109,6 +108,14 @@ if(STABLECOPS_BUILD_EXAMPLES)
         )
         target_link_libraries(${example} PRIVATE stablecops)
     endforeach()
+
+    # Leg-specific tooling lives under leg/ to keep it separate from the generic
+    # examples. zero_leg is CAN-only (no EtherCAT); the EtherCAT-backed leg tools
+    # are built in the STABLECOPS_BUILD_ECAT block below.
+    add_executable(zero_leg leg/examples/zero_leg.cpp)
+    set_target_properties(zero_leg PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
+    target_link_libraries(zero_leg PRIVATE stablecops)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -141,10 +148,24 @@ if(STABLECOPS_BUILD_ECAT)
     # Validation: replay a recorded joint trajectory on the two CAN drives (CSP)
     # while logging the foot pitch/roll measured by the two EtherCAT encoders
     # against the expected pitch/roll from the trajectory CSV.
-    add_executable(validate_trajectory examples/validate_trajectory.cpp)
+    add_executable(validate_trajectory leg/examples/validate_trajectory.cpp)
     set_target_properties(validate_trajectory PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
     target_link_libraries(validate_trajectory PRIVATE ecat_core stablecops)
+
+    # Calibration: drive both CAN joints to their NVM zero and latch the two
+    # EtherCAT encoder offsets there (saved to a file for capture_rom).
+    add_executable(capture_ecat_zero leg/examples/capture_ecat_zero.cpp)
+    set_target_properties(capture_ecat_zero PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
+    target_link_libraries(capture_ecat_zero PRIVATE ecat_core stablecops)
+
+    # Range-of-motion: read the EtherCAT encoders only (CAN drives left
+    # de-energised so the joint backdrives freely) and log centered roll/pitch.
+    add_executable(capture_rom leg/examples/capture_rom.cpp)
+    set_target_properties(capture_rom PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
+    target_link_libraries(capture_rom PRIVATE ecat_core)
 endif()
 
 # ---------------------------------------------------------------------------
