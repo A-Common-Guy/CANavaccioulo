@@ -43,8 +43,8 @@ mode_policy: sdo-at-boot
 # node is pre-operational at boot; the drive obeys the target matching that mode
 # and ignores the others, so all cyclic targets can ride the bus every cycle.
 #
-# RxPDO1 (0x301): controlword (0x6040:00,16) + target position (0x607A:00,32)
-# RxPDO2 (0x381): target velocity (0x60FF:00,32) + target torque (0x6071:00,16)
+# RxPDO1 (0x200+node): controlword (0x6040:00,16) + target position (0x607A:00,32)
+# RxPDO2 (0x300+node): target velocity (0x60FF:00,32) + target torque (0x6071:00,16)
 # RxPDO3: disabled (unused).
 # TPDO feedback is left at the vendor default so statusword/mode/position/
 # velocity/torque stay available for every mode.

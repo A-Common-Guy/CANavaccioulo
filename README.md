@@ -1,164 +1,134 @@
 # stableCOPS
 
-A small C++17 library for driving CANopen / CiA-402 servo motors over SocketCAN,
-built on Lely CANopen. It hides the CANopen state machine, cyclic PDO exchange,
-faults, and shutdown behind one thread-safe handle: **`MotorDrive`**.
+A C++17 library for driving CANopen / CiA-402 servo drives over SocketCAN,
+built on [Lely CANopen](https://opensource.lely.com/canopen/). It hides the
+CANopen state machine, cyclic PDO exchange, faults, homing, and shutdown behind
+one thread-safe handle: **`MotorDrive`**.
 
-- **Development, CLI tools, examples, tuning:** [`docs/development.md`](docs/development.md)
-- **EDS -> DCF data pipeline:** [`docs/canopen_motor_pipeline.md`](docs/canopen_motor_pipeline.md)
+| Document | What it covers |
+| --- | --- |
+| this README | Quick start, the `MotorDrive` API, configuration, safety |
+| [`docs/development.md`](docs/development.md) | Building, tests, CLI tools, examples, real-time tuning |
+| [`docs/architecture.md`](docs/architecture.md) | Runtime internals: threading, cyclic engine, DS402 control, safety, homing |
+| [`docs/canopen_motor_pipeline.md`](docs/canopen_motor_pipeline.md) | Motor profiles and the EDS → DCF/summary generation pipeline |
+| [`docs/eyou_rp_notes.md`](docs/eyou_rp_notes.md) | EYou/EuServo RP drive specifics: quirks, units, faults, wire-level debugging |
 
-## Use it in another project
+## Quick start
 
-Prerequisite on any machine that builds or runs it:
+Install the one build/runtime dependency, then link the CMake target:
 
 ```bash
 sudo apt-get install pkg-config liblely-coapp-dev
 ```
 
-Then pick one of the following. In all cases you link a single target and the
-public API needs no Lely or pkg-config on the consumer side:
-
 ```cmake
+find_package(stableCOPS REQUIRED)          # or add_subdirectory / FetchContent
 target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
 ```
 
-**A) Install once, then `find_package` (recommended).**
-
-```bash
-# In the stableCOPS checkout:
-cmake --preset default
-cmake --build --preset default
-cmake --install build --prefix /your/prefix     # sudo for a system prefix
-```
-
-```cmake
-# In your project (add -DCMAKE_PREFIX_PATH=/your/prefix if not a system prefix):
-find_package(stableCOPS REQUIRED)
-target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
-```
-
-**B) Vendor the source and `add_subdirectory`.** Embedded builds only the
-library (tools/examples/install are skipped unless you opt in with
-`-DSTABLECOPS_BUILD_TOOLS=ON` etc.).
-
-```cmake
-add_subdirectory(third_party/stableCOPS)
-target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
-```
-
-**C) Pull it with `FetchContent`.**
-
-```cmake
-include(FetchContent)
-FetchContent_Declare(stableCOPS
-    GIT_REPOSITORY <your-repo-url>
-    GIT_TAG        main)
-FetchContent_MakeAvailable(stableCOPS)
-target_link_libraries(myapp PRIVATE stableCOPS::stablecops)
-```
-
-At runtime the target needs `liblely-coapp` installed (recorded as a `NEEDED`
-dependency of `libstablecops.so`), SocketCAN up (`sudo ./canup.sh`), CAN
-privileges (root or `CAP_NET_ADMIN`), and the generated DCF/summary files
-reachable at the paths set in `MotorConfig` (installed samples live under
-`share/stablecops/`).
-
-## The interface: `MotorDrive`
-
-You only ever hold `MotorDrive` objects. Each names a CAN interface and a node
-id; drives on the **same** interface transparently share one bus (one master,
-one loop thread, one SYNC). Construct all drives for a chain, then `start()`.
+The public headers are Lely-free, so consumers need no Lely headers or link
+flags of their own. At runtime you need SocketCAN up (`sudo ./canup.sh`), CAN
+privileges, and the generated DCF/summary reachable at the paths in
+`MotorConfig` (installed samples live under `share/stablecops/`).
 
 ```cpp
 #include "stablecops/app/MotorConfig.hpp"
 #include "stablecops/app/MotorDrive.hpp"
-#include "stablecops/ds402/State.hpp"
 
 using namespace stablecops;
 
-app::MotorConfig config;                 // see fields below
+app::MotorConfig config;                 // profile fills scaling/timeouts/homing
 config.can_interface = "can0";
 config.node_id = 1;
 config.operation_mode = ds402::OperationMode::CyclicSynchronousPosition;
-config.enable_on_boot = true;            // energise + hold current position at boot
+config.enable_on_boot = true;            // energise + hold current position
 
 app::MotorDrive drive(config);
 drive.start();                           // boots the chain; throws on failure
+drive.waitUntilLive(std::chrono::seconds(5));
 
 while (drive.feedbackLive()) {           // false once the drive stops talking
     auto fb = drive.feedback();          // thread-safe snapshot
-    // fb.state / fb.position / fb.velocity / fb.torque / fb.error_code
     drive.commandPosition(fb.position);  // stream a CSP setpoint
-
     if (drive.faulted()) {
-        drive.resetFault();              // clear + recover to the configured state
+        drive.resetFault();              // clear + recover to current intent
     }
 }
 
-drive.quickStop();                       // controlled ramp-down (holds energised)
+drive.quickStop();                       // controlled ramp-down (stays energised)
 drive.stop();                            // graceful de-energise (coasts)
 ```
 
-### API at a glance
+Several `MotorDrive`s that name the same `can_interface` transparently share
+one bus (one Lely master, one loop thread, one SYNC). Construct all drives for
+a chain first, then `start()` any one of them.
 
-- **Lifecycle:** `start()`, `stop()` (coast), `quickStop()` (ramp + hold),
-  `running()`.
-- **Telemetry (any thread):** `feedback()`, `feedbackLive()`,
-  `positionDegrees()` / `positionRadians()`, `cyclicStats()`.
-- **Status / faults:** `enabled()`, `faulted()`, `errorCode()`, `resetFault()`.
-- **Enable / mode:** `enableOperation(hold)`, `setOperationMode(mode)`
+## The `MotorDrive` API
+
+- **Lifecycle** — `start()`, `stop()` (coast), `quickStop()` (ramp + hold),
+  `running()`, `shutdownBus()` / `forceStopBus()` (whole-chain teardown).
+- **Telemetry (any thread)** — `feedback()`, `feedbackLive()`,
+  `waitUntilLive(timeout)`, `positionDegrees()` / `positionRadians()`,
+  `cyclicStats()` (achieved cycle interval / jitter).
+- **Status & faults** — `enabled()`, `faulted()`, `errorCode()`, `resetFault()`.
+- **Enable & mode** — `enableOperation(hold)`, `setOperationMode(mode)`
   (confirmed against 0x6061).
-- **Cyclic setpoints:** `commandPosition()` (CSP), `commandVelocity()` (CSV/PV),
-  `commandTorque()` (CST/PT).
-- **Profile move:** `moveToPosition(counts, relative)` (PP; drive runs the ramp).
-- **Homing:** `startHoming(config)`, `homingPhase()`, `homingResult()`.
-- **Objects:** `readObject()` / `writeObject()` for arbitrary SDO/PDO objects.
+- **Cyclic setpoints** — `commandPosition()` (CSP), `commandVelocity()`
+  (CSV/PV), `commandTorque()` (CST/PT).
+- **Profile move** — `moveToPosition(counts, relative)` (PP; the drive runs its
+  own trajectory).
+- **Homing** — `startHoming(config)`, `homingPhase()`, `homingResult()`;
+  `drive.config().homing` is the actuator's profile-tuned base configuration.
+- **Objects** — `readObject()` / `writeObject()` for arbitrary CANopen objects
+  (served from the cyclic cache or staged into it when mapped, SDO otherwise).
+- **Configuration** — `config()` returns the profile-resolved `MotorConfig`
+  this drive runs with.
 
-### Key `MotorConfig` fields
+## Configuration
 
-- `can_interface`, `node_id` - which bus and drive.
-- `master_dcf_path`, `summary_path` - generated artifacts, loaded **by path** at
-  boot (point these at your own copies; installed samples live under
-  `share/stablecops/`).
-- `operation_mode` - CSP/CSV/CST or PP/PV/PT.
-- `enable_on_boot` / `hold_position_on_boot` / `monitor_on_boot`.
+`MotorConfig` is the only configuration type. The **motor profile YAML** is the
+single source of truth for actuator settings: its `runtime:` section (scaling,
+watchdog windows, homing defaults) and the master's SYNC period are recorded in
+the generated `summary.json`, and constructing a `MotorDrive` resolves them
+into the config:
+
+- a field you left at its built-in default takes the profile's value;
+- a field you set explicitly (code or CLI flag) wins;
+- `sync_period_us` **always** follows the summary — it must match the DCF.
+
+Key fields:
+
+- `can_interface`, `node_id` — which bus and drive.
+- `master_dcf_path`, `summary_path` — generated artifacts, loaded by path at
+  boot ([pipeline doc](docs/canopen_motor_pipeline.md)).
+- `operation_mode` — CSP/CSV/CST or PP/PV/PT, selected over SDO at boot.
+- `enable_on_boot` / `hold_position_on_boot` / `monitor_on_boot` — boot action.
 - `profile_velocity` / `profile_acceleration` / `profile_deceleration` /
-  `torque_slope` - profile-mode ramps.
-- `counts_per_rev` - scaling for `positionDegrees()`/`positionRadians()`.
-- `feedback_timeout` - staleness watchdog window (0 disables).
-- `sync_period_us`, `rt` - cyclic period and optional real-time tuning.
-- `homing` - the actuator's homing defaults, used as the base for
-  `startHoming()` (override e.g. `home_offset` per application).
-
-**Profile-sourced defaults.** The motor profile YAML is the single source of
-truth for actuator settings: its `runtime:` section (scaling, watchdog windows,
-homing defaults) is recorded in the generated `summary.json`, and constructing a
-`MotorDrive` fills every field you left at its built-in default from there
-(`sync_period_us` always follows the summary, since it must match the DCF).
-Fields you set explicitly win. Read the effective values back with
-`drive.config()`.
+  `torque_slope` — profile-mode ramps, written over SDO at boot when set.
+- `counts_per_rev`, `feedback_timeout`, `max_position_step`, `homing` —
+  actuator values, profile-sourced.
+- `sync_period_us`, `rt` — bus-level: cyclic period and opt-in real-time tuning.
 
 ## Safety behaviour
 
-- **Feedback watchdog:** while energised, if no cyclic feedback arrives for
-  `feedback_timeout` (default 100 ms) the power stage is dropped and
-  `feedbackLive()` goes false.
-- **Fault detection on three channels:** DS402 statusword / `0x603F` in the
-  cyclic TPDO, the drive's EMCY messages (`emergency_error_code` /
-  `error_register`), and node loss via the master's consumer heartbeat
-  (`node_alive`, ~300 ms). `resetFault()` clears and recovers.
-- **Stopping:** `stop()` de-energises (the joint coasts). For a loaded or
-  vertical axis prefer `quickStop()`, which decelerates on the drive's quick-stop
-  ramp and holds energised. Neither tears down the shared bus.
-- **Position units:** `feedback().position` is the raw `0x6064` count; the
-  degree/radian helpers scale it by `counts_per_rev`.
+- **Feedback watchdog** — while energised, no cyclic feedback for
+  `feedback_timeout` (default 100 ms) drops the power stage and clears
+  `feedbackLive()`.
+- **Three fault channels** — DS402 statusword / 0x603F in the cyclic TPDO, the
+  drive's EMCY messages, and node loss via the master's consumer heartbeat
+  (`feedback().node_alive`). `resetFault()` clears and recovers to the current
+  operating intent.
+- **Stopping** — `stop()` de-energises (the joint coasts). Prefer `quickStop()`
+  for a loaded or vertical axis: it decelerates on the drive's quick-stop ramp
+  and holds energised. Neither tears down the shared bus.
+- **Setpoint hygiene** — enable, fault recovery, and mode changes glue the
+  position target to the measured position so the drive never sees a step.
 
 ## Logging
 
-The library never writes to stdout/stderr directly - it routes through
-`stablecops::log`. By default whole lines go to stderr (errors/warnings) and
-stdout (info); install a sink to redirect, prefix, or silence, and set a minimum
-level:
+The library never writes to stdout/stderr directly; it routes whole lines
+through `stablecops::log`. Install a sink to redirect or silence it, and set a
+minimum level:
 
 ```cpp
 #include "stablecops/log/Log.hpp"
@@ -170,6 +140,6 @@ stablecops::log::setSink([](stablecops::log::Level level, const std::string& lin
 
 ## Operator tools
 
-Besides the library there are two command-line front-ends - a bring-up/diagnostic
-tool (`stablecops_master`) and a browser commissioning UI
-(`stablecops_commissiond`). See [`docs/development.md`](docs/development.md).
+Two CLI front-ends ship with the library: `stablecops_master` (bring-up and
+diagnostics) and `stablecops_commissiond` (browser commissioning UI). See
+[`docs/development.md`](docs/development.md).

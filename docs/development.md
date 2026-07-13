@@ -1,246 +1,231 @@
-# stableCOPS development guide
+# Development guide
 
-This guide covers building from source, the CLI tools, generating CANopen
-artifacts, the runnable examples, real-time tuning, and the repo layout. For the
-library API a consumer actually integrates against, see the top-level
-[`README.md`](../README.md). For the data-driven EDS -> DCF pipeline, see
-[`canopen_motor_pipeline.md`](canopen_motor_pipeline.md).
+Building from source, running the tests, the CLI tools, the runnable examples,
+and real-time tuning. For the library API see the top-level
+[`README.md`](../README.md); for runtime internals see
+[`architecture.md`](architecture.md).
 
-## Build from source
+## Build
 
 ```bash
-sudo apt-get update
 sudo apt-get install pkg-config liblely-coapp-dev liblely-co-tools python3-dcf-tools
 
 cmake --preset default
 cmake --build --preset default
 ```
 
-Artifacts land in `build/`: the shared library `libstablecops.so`, the tools
-(`stablecops_master`, `stablecops_commissiond`), and the examples under
-`build/examples/`.
+Artifacts land in `build/`: `libstablecops.so`, the tools (`stablecops_master`,
+`stablecops_commissiond`), the unit tests (`stablecops_tests`), and the
+examples under `build/examples/`.
 
-Install (produces the versioned `.so`, headers, `stableCOPS` CMake package, and
-sample data under `share/stablecops/`):
+Install (versioned `.so`, headers, `stableCOPS` CMake package, sample data
+under `share/stablecops/`):
 
 ```bash
 cmake --install build --prefix /your/prefix   # sudo for a system prefix
 ```
 
-## Generate CANopen artifacts
+CMake options (all default ON when stableCOPS is the top-level project, OFF
+when embedded): `STABLECOPS_BUILD_TOOLS`, `STABLECOPS_BUILD_EXAMPLES`,
+`STABLECOPS_BUILD_TESTS`, `STABLECOPS_INSTALL`. EtherCAT extras are opt-in
+(`STABLECOPS_BUILD_ECAT`, see below).
+
+## Tests
+
+Framework-free unit tests cover the pure parts of the library: DS402
+statusword decoding, fault/abort-code decoding, the PDO-summary loader, and
+profile resolution.
 
 ```bash
-python3 tools/generate_canopen_config.py --profile config/motors/eyou_phu.yml
+build/stablecops_tests        # run directly, or:
+ctest --test-dir build -R stablecops_tests --output-on-failure
 ```
 
-This derives a normalized EDS, dcfgen YAML, PDO summary, and `dcf/master.dcf`
-from the immutable vendor EDS. Full workflow:
-[`canopen_motor_pipeline.md`](canopen_motor_pipeline.md).
+No hardware or CAN interface is needed. Add checks here whenever you touch
+`ds402::decodeState`, the diagnostics tables, `config::PdoMap`, or
+`config::resolveMotorConfig`.
 
-## Bring up CAN
+## Lint & format
+
+clangd/clang-tidy/clang-format read `build/compile_commands.json` plus the repo
+configs (`.clangd`, `.clang-tidy`, `.clang-format`).
 
 ```bash
-sudo ./canup.sh      # sets bitrate and txqueuelen 1000
-```
-
-## CLI tool: `stablecops_master`
-
-A thin command-line front-end over the runtime, useful for bring-up and
-diagnostics.
-
-```bash
-# Print resolved configuration without opening CAN:
-build/stablecops_master --can can0
-
-# Boot the drive:
-build/stablecops_master --can can0 --dcf dcf/master.dcf --master-node 127 --node 1 --run
-
-# Boot and dump live CANopen/DS402 objects:
-build/stablecops_master --can can0 --node 1 --inspect --run
-
-# Receive cyclic PDO feedback without energising the drive:
-build/stablecops_master --can can0 --node 1 --monitor --run
-
-# Safely enable the DS402 power stage:
-build/stablecops_master --can can0 --node 1 --enable --run
-
-# Enable and hold the current CSP position:
-build/stablecops_master --can can0 --node 1 --hold-position --run
-
-# Select the operation mode at boot (csp|csv|cst cyclic, pp|pv|pt profile):
-build/stablecops_master --can can0 --node 1 --mode csv --enable --run
-build/stablecops_master --can can0 --node 1 --mode pv --profile-accel 200000 --profile-decel 200000 --enable --run
-
-# Guarded CSP step (only after hold/enable is verified):
-build/stablecops_master --can can0 --node 1 --csp-relative 1000 --max-position-step 1000 --run
-
-# Several nodes on one shared SYNC, with a cyclic cadence/jitter readout:
-build/stablecops_master --can can0 --nodes 1,2 --monitor --stats --run
-build/stablecops_master --can can0 --nodes 1,2 --monitor --stats --rt --rt-cpu 2 --run
-```
-
-## CLI tool: `stablecops_commissiond` (browser UI)
-
-Boots the runtime in monitor mode, configures cyclic PDO feedback, and serves a
-local web page for status, typed object reads/writes, CiA402
-enable/quick-stop/stop/fault-reset, setpoints, and encoder feedback:
-
-```bash
-build/stablecops_commissiond --can can0 --dcf dcf/master.dcf --nodes 1,2 --mode csp
-# open http://127.0.0.1:8765/
-```
-
-Use `--mode pp|pv|pt|csv|cst` to match the profile/cyclic mode. Controlword and
-target objects are driven through the PDO/CiA402 path once mapped, so use the UI
-motion buttons for movement and the object panel for parameters/diagnostics.
-Send the mode (0x6060) with the separate **Send Mode** action before enabling or
-before the first setpoint, then confirm the displayed mode in the status panel.
-With several nodes the daemon boots them on one shared bus/SYNC and the target-
-node selector chooses which drive receives commands. The object panel loads the
-generated normalized EDS (`--eds` to override) so you can search the vendor
-registers (access type, PDO mapping, data type, default value).
-
-## Examples
-
-Each example is a small, self-contained program built on the `MotorDrive` API.
-Defaults command **no motion** (a zero setpoint); passing a nonzero setpoint
-SPINS the motor, so keep the joint clear.
-
-| Example | Mode | What it shows |
-| --- | --- | --- |
-| [`pdo_feedback_monitor`](../examples/pdo_feedback_monitor.cpp) | monitor | Stream decoded feedback over PDO, power stage off |
-| [`enable_and_hold`](../examples/enable_and_hold.cpp) | CSP | Enable and hold the current position, print feedback |
-| [`csp_position`](../examples/csp_position.cpp) | CSP | Hold `start + offset` counts |
-| [`csv_velocity`](../examples/csv_velocity.cpp) | CSV | Stream a constant target velocity |
-| [`cst_torque`](../examples/cst_torque.cpp) | CST | Stream a constant target torque |
-| [`pp_move`](../examples/pp_move.cpp) | PP | One relative profile-position move (drive runs its own trajectory) |
-| [`pv_velocity`](../examples/pv_velocity.cpp) | PV | Target velocity via the drive's accel/decel ramp |
-| [`pt_torque`](../examples/pt_torque.cpp) | PT | Target torque via the drive's torque slope |
-| [`multi_drive`](../examples/multi_drive.cpp) | multi | Two drives on one shared bus, with a jitter readout |
-
-```bash
-build/examples/pdo_feedback_monitor --can can0 --node 1 --seconds 10
-build/examples/enable_and_hold      --can can0 --node 1 --seconds 10
-build/examples/csp_position         --can can0 --node 1 --amplitude 0 --seconds 5
-build/examples/csv_velocity         --can can0 --node 1 --velocity 0 --seconds 5
-build/examples/cst_torque           --can can0 --node 1 --torque 0 --seconds 5
-build/examples/pp_move              --can can0 --node 1 --offset 0 --profile-velocity 50000 --seconds 5
-build/examples/pv_velocity          --can can0 --node 1 --velocity 0 --seconds 5
-build/examples/pt_torque            --can can0 --node 1 --torque 0 --torque-slope 1000 --seconds 5
-build/examples/multi_drive          --can can0 --nodes 1,2 --seconds 10   # add --enable to energise + hold
-```
-
-## EtherCAT + CAN (motion-faster)
-
-The repo vendors the EtherCAT library [`motion-faster`](../mm/motion-faster) so a
-single program can read EtherCAT drives while stableCOPS moves CAN motors. It is
-**off by default** (it pulls SOEM + yaml-cpp via FetchContent and needs CMake
->= 3.28). Enable it explicitly:
-
-```bash
-cmake --preset default -DSTABLECOPS_BUILD_ECAT=ON
-cmake --build --preset default
-```
-
-This builds `motion-faster`'s `ecat_core` library plus two examples:
-
-| Example | What it shows |
-| --- | --- |
-| [`motion_faster_encoder`](../examples/motion_faster_encoder.cpp) | Print the auxiliary (load) encoder (CoE `0x2033`) of every EtherCAT drive |
-| [`motion_faster_can_move`](../examples/motion_faster_can_move.cpp) | Read EtherCAT encoders while moving a CAN motor (CSV) - the two stacks run on separate threads |
-
-```bash
-# EtherCAT read only (scan mode auto-detects the drives):
-sudo build/examples/motion_faster_encoder enp0s31f6
-
-# EtherCAT read + CAN motion (default --velocity 0 holds; nonzero SPINS the motor):
-sudo ./canup.sh
-sudo build/examples/motion_faster_can_move \
-    --ecat enp0s31f6 --can can0 --node 1 --velocity 0 --seconds 30
-```
-
-The EtherCAT master (`MasterRuntime`) owns its own RT thread and installs the
-SIGINT handler; the CAN side is a normal `MotorDrive` on its shared bus thread.
-Ctrl-C ends the loop and the CAN drive is de-energised on exit. EtherCAT needs a
-raw NIC (run as root / `CAP_NET_RAW`); CAN needs SocketCAN up and CAN
-privileges, exactly as for the other examples.
-
-## Real-time loop (latency / jitter)
-
-The bus loop thread can be tuned for deterministic cadence. It is opt-in and
-shared by all drives on an interface (`MotorConfig::rt`, or the `--rt*` CLI
-flags). When enabled the thread is moved to `SCHED_FIFO`, optionally pinned to
-one CPU, and process memory is locked (`mlockall`):
-
-```cpp
-config.rt.enabled = true;     // SCHED_FIFO
-config.rt.priority = 80;      // 1..99
-config.rt.cpu = 2;            // pin to a core (-1 = unpinned); pair with isolcpus
-config.rt.lock_memory = true; // mlockall to keep the cyclic path off the pager
-config.sync_period_us = 1000; // nominal period for jitter telemetry (match the DCF SYNC)
-```
-
-This needs privileges. Without them the loop logs a warning and keeps running at
-normal priority (no hard failure). Grant them per user via
-`/etc/security/limits.conf`:
-
-```
-<user>  -  rtprio   99
-<user>  -  memlock  unlimited
-```
-
-or run with `CAP_SYS_NICE` / `sudo`. For the lowest jitter, keep other work off
-the chosen core (boot with `isolcpus=<cpu>`) and read the achieved cadence from
-`cyclicStats()` (CLI `--stats`): interval min/max/mean and worst-case jitter vs
-`sync_period_us`.
-
-### Bus bandwidth
-
-At 1 Mbit/s classic CAN, two drives at a 1 ms SYNC with the cyclic superset
-layout are already close to the practical bus limit (SYNC + 4 feedback TPDOs +
-up to 4 command RPDOs per millisecond, before SDO traffic). If SocketCAN reports
-`CAN transmit queue full`, bring the interface up with `canup.sh` (sets
-`txqueuelen 1000`), then slow the profile (`master.sync_period`, e.g. `2000` us)
-or reduce mapped PDO traffic before adding nodes.
-
-## Linting & formatting
-
-In-editor diagnostics, completion, and go-to come from **clangd**, which reads
-`build/compile_commands.json` plus the repo configs (`.clangd`, `.clang-tidy`,
-`.clang-format`). Static analysis is **clang-tidy**; formatting is
-**clang-format**.
-
-```bash
-# Tools (user-space; or apt install clangd clang-tidy clang-format):
-pip install --user clangd clang-tidy clang-format
-cmake --preset default        # creates build/compile_commands.json
-
 tools/lint.sh format          # rewrite files in place
 tools/lint.sh format-check    # fail if anything is unformatted
 tools/lint.sh tidy            # clang-tidy static analysis
 tools/lint.sh                 # format-check + tidy
 ```
 
-Note: pip-installed clang defaults to a gcc toolchain dir without libstdc++
-headers, so `.clangd` and `tools/lint.sh` pin it to gcc-11
-(`--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11`). Adjust for your system
-(`ls -d /usr/include/c++/*`).
+Note: pip-installed clang tools default to a gcc toolchain dir without
+libstdc++ headers, so `.clangd` and `tools/lint.sh` pin
+`--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11`; adjust for your system.
+
+## Bring up CAN
+
+```bash
+sudo ./canup.sh      # sets the bitrate and txqueuelen 1000
+```
+
+## Motor profiles & generated artifacts
+
+Runtime configuration is generated from a motor profile YAML — the single
+source of truth for the PDO layout, SYNC period, and actuator runtime settings:
+
+```bash
+python3 tools/generate_canopen_config.py --profile config/motors/euservo_rp.yml
+```
+
+Full workflow and profile reference:
+[`canopen_motor_pipeline.md`](canopen_motor_pipeline.md).
+
+## CLI: `stablecops_master`
+
+Bring-up and diagnostics front-end over the runtime. Without `--run` it only
+prints the resolved configuration.
+
+```bash
+# Print the resolved configuration (profile values included), no CAN access:
+build/stablecops_master --can can0
+
+# Boot and dump live CANopen/DS402 objects (read-only):
+build/stablecops_master --can can0 --node 1 --inspect --run
+
+# Receive cyclic PDO feedback without energising the drive:
+build/stablecops_master --can can0 --node 1 --monitor --run
+
+# Safely enable, or enable + hold the current CSP position:
+build/stablecops_master --can can0 --node 1 --enable --run
+build/stablecops_master --can can0 --node 1 --hold-position --run
+
+# Select the operation mode at boot (csp|csv|cst cyclic, pp|pv|pt profile):
+build/stablecops_master --can can0 --node 1 --mode csv --enable --run
+build/stablecops_master --can can0 --node 1 --mode pv --profile-accel 200000 --enable --run
+
+# Guarded CSP step (only after hold/enable is verified):
+build/stablecops_master --can can0 --node 1 --csp-relative 1000 --max-position-step 1000 --run
+
+# Raw SDO write at boot, persist to NVM:
+build/stablecops_master --can can0 --node 1 --set 0x605C:0:i16=0 --save --run
+
+# Several nodes on one shared SYNC, with a cadence/jitter readout:
+build/stablecops_master --can can0 --nodes 1,2 --monitor --stats --run
+build/stablecops_master --can can0 --nodes 1,2 --monitor --stats --rt --rt-cpu 2 --run
+```
+
+## CLI: `stablecops_commissiond` (browser UI)
+
+Boots the runtime in monitor mode and serves a local web UI for status, CiA402
+enable / quick-stop / stop / fault-reset, setpoints, homing, and typed object
+reads/writes:
+
+```bash
+build/stablecops_commissiond --can can0 --nodes 1,2 --mode csp
+# open http://127.0.0.1:8765/
+```
+
+- Motion goes through the same `MotorDrive`/CiA402 path as the library; the
+  object panel is for parameters and diagnostics (controlword/targets are
+  PDO-driven on this firmware — use the motion buttons).
+- Send the mode (0x6060) with **Send Mode** before enabling or before the first
+  setpoint, then confirm the displayed mode in the status panel.
+- Homing fields start from the actuator's profile defaults; the object panel
+  loads the generated normalized EDS (`--eds` to override).
+- With several nodes the daemon boots them on one shared bus/SYNC; the target
+  node selector picks which drive receives commands.
+
+## Examples
+
+Each example is a small program built on the `MotorDrive` API; the common
+bus/node flags live in [`examples/example_cli.hpp`](../examples/example_cli.hpp).
+Defaults command **no motion** (a zero setpoint); a nonzero setpoint MOVES the
+motor, so keep the joint clear.
+
+| Example | Mode | What it shows |
+| --- | --- | --- |
+| `pdo_feedback_monitor` | monitor | Decoded cyclic feedback, power stage off |
+| `enable_and_hold` | CSP | Enable and hold the current position |
+| `csp_position` | CSP | Stream a sine wave around the start position |
+| `csv_velocity` | CSV | Stream a constant target velocity |
+| `cst_torque` | CST | Stream a constant target torque |
+| `pp_move` | PP | One relative profile-position move |
+| `pv_velocity` | PV | Velocity via the drive's accel/decel ramp |
+| `pt_torque` | PT | Torque via the drive's torque slope |
+| `multi_drive` | multi | Two drives on one shared bus, jitter readout |
+
+```bash
+build/examples/pdo_feedback_monitor --can can0 --node 1 --seconds 10
+build/examples/csv_velocity         --can can0 --node 1 --velocity 0 --seconds 5
+build/examples/multi_drive          --can can0 --nodes 1,2 --seconds 10   # --enable to energise
+```
+
+Leg-specific tools live under `leg/examples/`:
+
+| Tool | Needs | What it does |
+| --- | --- | --- |
+| `zero_leg` | CAN | Hardstop-midpoint homing + leg zero offset, saved to NVM |
+| `dump_config` | CAN | Read-only side-by-side dump of both drives' parameters (optional CSV) |
+| `capture_ecat_zero`, `capture_rom`, `validate_trajectory`, `validate_mapper`, `ankle_pd_torque` | EtherCAT (+CAN) | Encoder calibration / validation workflows |
+
+## EtherCAT + CAN (motion-faster)
+
+The repo vendors the EtherCAT library `mm/motion-faster` so one program can
+read EtherCAT encoders while stableCOPS moves CAN motors. Off by default (pulls
+SOEM + yaml-cpp via FetchContent, needs CMake >= 3.28):
+
+```bash
+cmake --preset default -DSTABLECOPS_BUILD_ECAT=ON
+cmake --build --preset default
+```
+
+EtherCAT needs a raw NIC (root / `CAP_NET_RAW`). The closed-chain ankle mapper
+adds `-DSTABLECOPS_BUILD_MAPPER=ON` (and
+`-DSTABLECOPS_ANKLE_GENERATION=gen3-1|gen3-2`).
+
+```bash
+sudo build/examples/motion_faster_encoder enp0s31f6
+sudo build/examples/motion_faster_can_move --ecat enp0s31f6 --can can0 --node 1 --velocity 0
+```
+
+## Real-time tuning
+
+The bus loop thread can be tuned for deterministic cadence — opt-in, shared by
+all drives on an interface (`MotorConfig::rt` or the `--rt*` flags):
+
+```cpp
+config.rt.enabled = true;     // SCHED_FIFO
+config.rt.priority = 80;      // 1..99
+config.rt.cpu = 2;            // pin to a core (-1 = unpinned); pair with isolcpus
+config.rt.lock_memory = true; // mlockall keeps the cyclic path off the pager
+```
+
+This needs privileges; without them the loop logs one warning and keeps running
+at normal priority. Grant per user via `/etc/security/limits.conf`:
+
+```
+<user>  -  rtprio   99
+<user>  -  memlock  unlimited
+```
+
+Verify the achieved cadence with `cyclicStats()` (CLI `--stats`): interval
+min/max/mean and worst-case jitter vs the profile's SYNC period. Bandwidth
+rule of thumb: at 1 Mbit/s classic CAN, two drives at a 1 ms SYNC with the
+cyclic superset layout are close to the practical bus limit — slow the
+profile's `master.sync_period` (e.g. 2000 µs) before adding nodes.
 
 ## Repository layout
 
-- `include/stablecops/app/` + `src/app/`: the public `MotorDrive` handle, the
-  shared `Bus`, the `CanopenApplication` loop owner, and real-time tuning.
-- `include/stablecops/ds402/` + `src/ds402/`: transport-independent DS402 state
-  decoding, feedback types, and the `DriveController` object facade.
-- `include/stablecops/lely/` + `src/lely/`: the Lely adapter (`MotorDriver`) that
-  drives the cyclic path; the only place Lely is used.
-- `include/stablecops/config/` + `src/config/`: the generated PDO-summary loader.
-- `include/stablecops/log/` + `src/log/`: the pluggable logging facade.
-- `src/tools/`: `stablecops_master` and `stablecops_commissiond`.
-- `examples/`: one small program per mode (table above).
-- `eds/EDS files/`: immutable vendor EDS files.
-- `config/motors/`: declarative motor profiles.
-- `tools/generate_canopen_config.py`: EDS normalization, dcfgen YAML, DCF
-  generation, and validation.
-- `generated/canopen/`: derived EDS/YAML/summary artifacts.
-- `dcf/master.dcf`: generated runtime DCF.
+- `include/stablecops/` + `src/` — the library:
+  - `config/` — `MotorConfig` + profile resolution, generated-summary loader.
+  - `ds402/` — transport-independent DS402 decoding, feedback types, diagnostics.
+  - `lely/` — the Lely adapter (`MotorDriver`); the only place Lely is used.
+  - `app/` — the public `MotorDrive` handle, shared `Bus`, loop owner, RT tuning.
+  - `log/` — the pluggable logging facade.
+- `src/tools/` — `stablecops_master`, `stablecops_commissiond`.
+- `tests/` — unit tests (`stablecops_tests`).
+- `examples/`, `leg/examples/` — runnable programs (tables above).
+- `config/motors/` — motor profiles (single source of truth).
+- `eds/EDS files/` — immutable vendor EDS files.
+- `tools/generate_canopen_config.py` — profile → artifacts generator.
+- `generated/canopen/`, `dcf/master.dcf` — derived artifacts; never hand-edit.
+- `docs_motor/` — vendor manuals (see [`eyou_rp_notes.md`](eyou_rp_notes.md)).
