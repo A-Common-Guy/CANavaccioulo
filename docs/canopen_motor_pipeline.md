@@ -62,6 +62,7 @@ eds_overrides:                         # bend the vendor PDO layout, per EDS sec
 
 runtime:                               # actuator runtime settings (see below)
   counts_per_rev: 524288
+  gear_ratio: 21.913                   # motor -> output reduction (RP90L reducer)
   feedback_timeout_ms: 100
   state_transition_timeout_ms: 2000
   max_position_step: 10000

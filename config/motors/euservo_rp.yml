@@ -69,6 +69,9 @@ eds_overrides:
 runtime:
   # Output-shaft encoder counts per revolution of 0x6064 (19-bit encoder).
   counts_per_rev: 524288
+  # Mechanical reduction between motor and output shaft (RP90L reducer, per the
+  # RP series spec table): joint torque = motor torque * gear_ratio (ideal).
+  gear_ratio: 21.913
   # Feedback-staleness watchdog window (0 disables).
   feedback_timeout_ms: 100
   # Timeout for each DS402 state transition.

@@ -11,6 +11,7 @@ are *not* in the manual — re-verify them on firmware updates.
 | Quantity | Unit | Notes |
 | --- | --- | --- |
 | position (0x6064 / 0x607A) | counts | 524288 counts/rev at the output shaft (19-bit) |
+| gear ratio (RP90L) | 21.913 | motor → output reduction; profile `runtime.gear_ratio` |
 | velocity (0x606C / 0x60FF) | counts/s | |
 | acceleration (0x6083/0x6084/0x6085) | counts/s² | |
 | torque (0x6071 / 0x6077 / 0x6072) | per-mille of **rated current** | not rated torque |

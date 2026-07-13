@@ -87,6 +87,10 @@ struct MotorConfig {
     int32_t max_position_step{10000};
     // [profile] Output-shaft counts per revolution of 0x6064.
     uint32_t counts_per_rev{524288};
+    // [profile] Mechanical reduction between motor and output shaft (torque
+    // multiplier / speed divider), e.g. 21.913 for the RP90L. Used by tools
+    // converting between motor-side and joint-side quantities. 0 = unspecified.
+    double gear_ratio{0.0};
     std::chrono::milliseconds boot_timeout{5000};
     // [profile] Timeout for each DS402 state transition.
     std::chrono::milliseconds state_transition_timeout{2000};

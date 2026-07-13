@@ -105,8 +105,8 @@ Key fields:
 - `enable_on_boot` / `hold_position_on_boot` / `monitor_on_boot` — boot action.
 - `profile_velocity` / `profile_acceleration` / `profile_deceleration` /
   `torque_slope` — profile-mode ramps, written over SDO at boot when set.
-- `counts_per_rev`, `feedback_timeout`, `max_position_step`, `homing` —
-  actuator values, profile-sourced.
+- `counts_per_rev`, `gear_ratio`, `feedback_timeout`, `max_position_step`,
+  `homing` — actuator values, profile-sourced.
 - `sync_period_us`, `rt` — bus-level: cyclic period and opt-in real-time tuning.
 
 ## Safety behaviour

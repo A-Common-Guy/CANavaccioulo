@@ -200,6 +200,7 @@ void testMotorConfigResolution() {
         "sync_period_us": 4000,
         "runtime": {
             "counts_per_rev": 262144,
+            "gear_ratio": 21.913,
             "feedback_timeout_ms": 50,
             "state_transition_timeout_ms": 3000,
             "max_position_step": 500,
@@ -218,6 +219,7 @@ void testMotorConfigResolution() {
     config = resolveMotorConfig(std::move(config));
     CHECK(config.sync_period_us == 4000);
     CHECK(config.counts_per_rev == 262144);
+    CHECK(config.gear_ratio == 21.913);
     CHECK(config.feedback_timeout == std::chrono::milliseconds{50});
     CHECK(config.state_transition_timeout == std::chrono::milliseconds{3000});
     CHECK(config.max_position_step == 500);
@@ -237,11 +239,13 @@ void testMotorConfigResolution() {
     MotorConfig overridden;
     overridden.summary_path = path;
     overridden.counts_per_rev = 1000;
+    overridden.gear_ratio = 5.0;
     overridden.feedback_timeout = std::chrono::milliseconds{7};
     overridden.homing.search_velocity = 777;
     overridden.sync_period_us = 999;  // ...except sync, which must match the DCF.
     overridden = resolveMotorConfig(std::move(overridden));
     CHECK(overridden.counts_per_rev == 1000);
+    CHECK(overridden.gear_ratio == 5.0);
     CHECK(overridden.feedback_timeout == std::chrono::milliseconds{7});
     CHECK(overridden.homing.search_velocity == 777);
     CHECK(overridden.sync_period_us == 4000);

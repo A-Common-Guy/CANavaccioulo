@@ -128,6 +128,7 @@ MotorConfig resolveMotorConfig(MotorConfig config) {
 
     applyIfDefault<uint32_t, uint32_t>(config.counts_per_rev, defaults.counts_per_rev, runtime,
                                        "counts_per_rev");
+    applyIfDefault<double, double>(config.gear_ratio, defaults.gear_ratio, runtime, "gear_ratio");
     applyIfDefault<int32_t, int32_t>(config.max_position_step, defaults.max_position_step, runtime,
                                      "max_position_step");
     applyIfDefaultMs(config.feedback_timeout, defaults.feedback_timeout, runtime,

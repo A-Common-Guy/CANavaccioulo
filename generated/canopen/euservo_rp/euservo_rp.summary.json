@@ -159,6 +159,7 @@
   },
   "runtime": {
     "counts_per_rev": 524288,
+    "gear_ratio": 21.913,
     "feedback_timeout_ms": 100,
     "state_transition_timeout_ms": 2000,
     "max_position_step": 10000,
