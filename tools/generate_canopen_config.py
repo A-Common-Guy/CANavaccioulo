@@ -404,11 +404,21 @@ def main() -> int:
         "node_id": node_ids[0],
         "node_ids": node_ids,
         "master_node_id": profile["master"].get("node_id", 127),
+        # The master's SYNC period in microseconds, recorded so the runtime's
+        # jitter reference always matches the generated DCF.
+        "sync_period_us": profile["master"].get("sync_period", 0),
         "identity_policy": profile.get("identity_policy", "strict"),
         "pdo_policy": profile.get("pdo_policy", "vendor-default"),
         "mode_policy": profile.get("mode_policy", "vendor-default"),
         "pdo_mappings": extract_pdo_mappings(sections, node_id=node_ids[0]),
     }
+    # Runtime settings (actuator scaling, watchdog windows, homing defaults)
+    # pass straight through from the profile; the C++ runtime reads them via
+    # config::resolveMotorConfig, keeping the profile the single source of
+    # truth for both ends.
+    runtime = profile.get("runtime")
+    if runtime:
+        summary["runtime"] = runtime
     summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
     print(f"Wrote {relpath(normalized_eds, root)}")

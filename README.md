@@ -127,6 +127,16 @@ drive.stop();                            // graceful de-energise (coasts)
 - `counts_per_rev` - scaling for `positionDegrees()`/`positionRadians()`.
 - `feedback_timeout` - staleness watchdog window (0 disables).
 - `sync_period_us`, `rt` - cyclic period and optional real-time tuning.
+- `homing` - the actuator's homing defaults, used as the base for
+  `startHoming()` (override e.g. `home_offset` per application).
+
+**Profile-sourced defaults.** The motor profile YAML is the single source of
+truth for actuator settings: its `runtime:` section (scaling, watchdog windows,
+homing defaults) is recorded in the generated `summary.json`, and constructing a
+`MotorDrive` fills every field you left at its built-in default from there
+(`sync_period_us` always follows the summary, since it must match the DCF).
+Fields you set explicitly win. Read the effective values back with
+`drive.config()`.
 
 ## Safety behaviour
 

@@ -31,6 +31,9 @@ using ObjectDataType = ds402::ObjectWidth;
 // interface that has already started throws.
 class MotorDrive {
 public:
+    // The config is profile-resolved on construction (config::resolveMotorConfig):
+    // fields left at their built-in defaults are filled from the runtime profile
+    // recorded in summary.json, and sync_period_us always follows the summary.
     explicit MotorDrive(MotorConfig config);
     ~MotorDrive();
 
@@ -64,6 +67,11 @@ public:
     bool forceStopBus();
 
     bool running() const;
+
+    // The profile-resolved configuration this drive runs with. Useful for
+    // reading the actuator's profile values (config().homing as the base for
+    // startHoming(), config().counts_per_rev for scaling, ...).
+    const MotorConfig& config() const { return config_; }
 
     // Latest feedback snapshot, safe to call from any thread. feedbackLive() is
     // true only while fresh cyclic feedback keeps arriving; it goes false if the

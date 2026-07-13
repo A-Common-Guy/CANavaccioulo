@@ -906,7 +906,8 @@ json feedbackJson(uint8_t node_id, stablecops::app::MotorDrive& drive) {
           {"emcy_error_code_hex", hexValue(feedback.emergency_error_code, 4)},
           {"error_register", feedback.error_register},
           {"error_register_hex", hexValue(feedback.error_register, 2)},
-          {"error_register_bits", stablecops::ds402::describeErrorRegister(feedback.error_register)}}},
+          {"error_register_bits",
+           stablecops::ds402::describeErrorRegister(feedback.error_register)}}},
         {"cyclic_stats",
          {{"cycles", stats.cycles},
           {"last_us", stats.last_us},
@@ -961,8 +962,7 @@ int64_t optionalSigned(const json& body, const char* field, int64_t fallback) {
     return body.at(field).get<int64_t>();
 }
 
-std::chrono::milliseconds optionalMilliseconds(const json& body,
-                                               const char* field,
+std::chrono::milliseconds optionalMilliseconds(const json& body, const char* field,
                                                std::chrono::milliseconds fallback) {
     return std::chrono::milliseconds{optionalSigned(body, field, fallback.count())};
 }
@@ -986,37 +986,27 @@ bool optionalBool(const json& body, const char* field, bool fallback) {
     throw std::invalid_argument(std::string(field) + " must be a boolean");
 }
 
-stablecops::ds402::HomingConfig parseHomingConfig(const json& body) {
-    stablecops::ds402::HomingConfig config;
-    config.search_velocity =
-        checkedI32(optionalSigned(body, "search_velocity", config.search_velocity),
-                   "search_velocity");
-    config.approach_velocity =
-        checkedI32(optionalSigned(body, "approach_velocity", config.approach_velocity),
-                   "approach_velocity");
-    config.center_velocity =
-        checkedI32(optionalSigned(body, "center_velocity", config.center_velocity),
-                   "center_velocity");
+stablecops::ds402::HomingConfig parseHomingConfig(const json& body,
+                                                  const stablecops::ds402::HomingConfig& defaults) {
+    stablecops::ds402::HomingConfig config = defaults;
+    config.search_velocity = checkedI32(
+        optionalSigned(body, "search_velocity", config.search_velocity), "search_velocity");
+    config.approach_velocity = checkedI32(
+        optionalSigned(body, "approach_velocity", config.approach_velocity), "approach_velocity");
+    config.center_velocity = checkedI32(
+        optionalSigned(body, "center_velocity", config.center_velocity), "center_velocity");
     config.center_final_velocity =
-        checkedI32(optionalSigned(body,
-                                  "center_final_velocity",
-                                  config.center_final_velocity),
+        checkedI32(optionalSigned(body, "center_final_velocity", config.center_final_velocity),
                    "center_final_velocity");
-    config.center_slowdown_distance =
-        checkedI32(optionalSigned(body,
-                                  "center_slowdown_distance",
-                                  config.center_slowdown_distance),
-                   "center_slowdown_distance");
-    config.backoff_distance =
-        checkedI32(optionalSigned(body, "backoff_distance", config.backoff_distance),
-                   "backoff_distance");
-    config.center_tolerance =
-        checkedI32(optionalSigned(body, "center_tolerance", config.center_tolerance),
-                   "center_tolerance");
+    config.center_slowdown_distance = checkedI32(
+        optionalSigned(body, "center_slowdown_distance", config.center_slowdown_distance),
+        "center_slowdown_distance");
+    config.backoff_distance = checkedI32(
+        optionalSigned(body, "backoff_distance", config.backoff_distance), "backoff_distance");
+    config.center_tolerance = checkedI32(
+        optionalSigned(body, "center_tolerance", config.center_tolerance), "center_tolerance");
     config.center_settle_tolerance =
-        checkedI32(optionalSigned(body,
-                                  "center_settle_tolerance",
-                                  config.center_settle_tolerance),
+        checkedI32(optionalSigned(body, "center_settle_tolerance", config.center_settle_tolerance),
                    "center_settle_tolerance");
     config.min_travel =
         checkedI32(optionalSigned(body, "min_travel", config.min_travel), "min_travel");
@@ -1024,17 +1014,14 @@ stablecops::ds402::HomingConfig parseHomingConfig(const json& body) {
         checkedI32(optionalSigned(body, "max_travel", config.max_travel), "max_travel");
     config.home_offset =
         checkedI32(optionalSigned(body, "home_offset", config.home_offset), "home_offset");
-    config.threshold_torque =
-        checkedI16(optionalSigned(body, "threshold_torque", config.threshold_torque),
-                   "threshold_torque");
-    config.stopped_velocity =
-        checkedI32(optionalSigned(body, "stopped_velocity", config.stopped_velocity),
-                   "stopped_velocity");
+    config.threshold_torque = checkedI16(
+        optionalSigned(body, "threshold_torque", config.threshold_torque), "threshold_torque");
+    config.stopped_velocity = checkedI32(
+        optionalSigned(body, "stopped_velocity", config.stopped_velocity), "stopped_velocity");
     config.contact_dwell = optionalMilliseconds(body, "contact_dwell_ms", config.contact_dwell);
     config.settle_time = optionalMilliseconds(body, "settle_time_ms", config.settle_time);
     config.timeout = optionalMilliseconds(body, "timeout_ms", config.timeout);
-    config.save_zero_to_nvm =
-        optionalBool(body, "save_zero_to_nvm", config.save_zero_to_nvm);
+    config.save_zero_to_nvm = optionalBool(body, "save_zero_to_nvm", config.save_zero_to_nvm);
     return config;
 }
 
@@ -1054,6 +1041,9 @@ public:
         if (drives_.empty()) {
             throw std::invalid_argument("CommissioningApi requires at least one drive");
         }
+        // Homing requests start from the actuator's profile-resolved defaults;
+        // request-body fields override individual values.
+        homing_defaults_ = drives_.begin()->second->config().homing;
     }
 
     HttpResponse operator()(const HttpRequest& request) {
@@ -1205,7 +1195,7 @@ private:
     HttpResponse startHoming(const json& body) {
         auto& drive = targetDrive(body);
         const auto node_id = targetNode(body);
-        const auto config = parseHomingConfig(body);
+        const auto config = parseHomingConfig(body, homing_defaults_);
         drive.startHoming(config);
         return jsonResponse({{"ok", true},
                              {"node", node_id},
@@ -1216,6 +1206,7 @@ private:
     DriveMap drives_;
     int32_t max_position_step_;
     json object_catalog_;
+    stablecops::ds402::HomingConfig homing_defaults_;
 };
 
 }  // namespace

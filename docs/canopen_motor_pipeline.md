@@ -107,6 +107,38 @@ nodes:
 image for every slave; the summary records all of them under `node_ids` (and
 keeps `node_id` as the first, for single-node call sites).
 
+### Runtime section (single source of truth)
+
+An optional `runtime:` section carries the actuator's runtime settings —
+scaling, watchdog windows, and homing defaults (see
+`config/motors/euservo_rp.yml` for the full commented set):
+
+```yaml
+runtime:
+  counts_per_rev: 524288
+  feedback_timeout_ms: 100
+  state_transition_timeout_ms: 2000
+  max_position_step: 10000
+  homing:
+    search_velocity: 25000
+    threshold_torque: 90
+    # ...
+```
+
+The generator copies it verbatim into `summary.json`, together with the
+master's `sync_period` (as `sync_period_us`). At runtime,
+`stablecops::config::resolveMotorConfig` — applied automatically when a
+`MotorDrive` or `CanopenApplication` is constructed — fills every `MotorConfig`
+field still at its built-in default from these values, and always takes
+`sync_period_us` from the summary (it must match the DCF the master loads). An
+explicitly set field (CLI flag, code) wins over the profile; the profile wins
+over the library's built-in defaults. So the chain is:
+
+    profile YAML  ->  summary.json + master.dcf  ->  resolved MotorConfig
+
+and tuning an actuator means editing the profile and regenerating — never
+touching C++ defaults or generated files.
+
 ## Generated Files
 
 For the PHU profile, generation writes:

@@ -43,6 +43,7 @@ add_library(stablecops SHARED
     src/ds402/DriveController.cpp
     src/ds402/Diagnostics.cpp
     src/ds402/State.cpp
+    src/config/MotorConfig.cpp
     src/config/PdoMap.cpp
     src/app/CanopenApplication.cpp
     src/app/Bus.cpp

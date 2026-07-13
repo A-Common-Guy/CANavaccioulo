@@ -3,11 +3,14 @@
 // each CHECK reports and fails the process on mismatch, so the binary doubles
 // as a quick smoke test (`ctest` or run it directly).
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <utility>
 
+#include "stablecops/config/MotorConfig.hpp"
 #include "stablecops/config/PdoMap.hpp"
 #include "stablecops/ds402/Diagnostics.hpp"
 #include "stablecops/ds402/State.hpp"
@@ -188,6 +191,71 @@ void testPdoMapErrors() {
     std::remove(path.c_str());
 }
 
+void testMotorConfigResolution() {
+    using stablecops::config::MotorConfig;
+    using stablecops::config::resolveMotorConfig;
+
+    const auto path = writeTempSummary("runtime_profile", R"({
+        "node_id": 1,
+        "sync_period_us": 4000,
+        "runtime": {
+            "counts_per_rev": 262144,
+            "feedback_timeout_ms": 50,
+            "state_transition_timeout_ms": 3000,
+            "max_position_step": 500,
+            "homing": {
+                "search_velocity": 12345,
+                "threshold_torque": 42,
+                "timeout_ms": 60000,
+                "save_zero_to_nvm": false
+            }
+        }
+    })");
+
+    // Fields left at their built-in defaults follow the profile.
+    MotorConfig config;
+    config.summary_path = path;
+    config = resolveMotorConfig(std::move(config));
+    CHECK(config.sync_period_us == 4000);
+    CHECK(config.counts_per_rev == 262144);
+    CHECK(config.feedback_timeout == std::chrono::milliseconds{50});
+    CHECK(config.state_transition_timeout == std::chrono::milliseconds{3000});
+    CHECK(config.max_position_step == 500);
+    CHECK(config.homing.search_velocity == 12345);
+    CHECK(config.homing.threshold_torque == 42);
+    CHECK(config.homing.timeout == std::chrono::milliseconds{60000});
+    CHECK(!config.homing.save_zero_to_nvm);
+    // Homing fields the profile does not name keep their built-in defaults.
+    CHECK(config.homing.backoff_distance == stablecops::ds402::HomingConfig{}.backoff_distance);
+
+    // Resolution is idempotent.
+    const auto again = resolveMotorConfig(config);
+    CHECK(again.counts_per_rev == config.counts_per_rev);
+    CHECK(again.homing.search_velocity == config.homing.search_velocity);
+
+    // Explicit (non-default) values win over the profile...
+    MotorConfig overridden;
+    overridden.summary_path = path;
+    overridden.counts_per_rev = 1000;
+    overridden.feedback_timeout = std::chrono::milliseconds{7};
+    overridden.homing.search_velocity = 777;
+    overridden.sync_period_us = 999;  // ...except sync, which must match the DCF.
+    overridden = resolveMotorConfig(std::move(overridden));
+    CHECK(overridden.counts_per_rev == 1000);
+    CHECK(overridden.feedback_timeout == std::chrono::milliseconds{7});
+    CHECK(overridden.homing.search_velocity == 777);
+    CHECK(overridden.sync_period_us == 4000);
+
+    std::remove(path.c_str());
+
+    // A missing summary leaves the config untouched.
+    MotorConfig missing;
+    missing.summary_path = "/nonexistent/summary.json";
+    missing = resolveMotorConfig(std::move(missing));
+    CHECK(missing.counts_per_rev == MotorConfig{}.counts_per_rev);
+    CHECK(missing.sync_period_us == MotorConfig{}.sync_period_us);
+}
+
 }  // namespace
 
 int main() {
@@ -196,6 +264,7 @@ int main() {
     testPdoMapNodeRelative();
     testPdoMapLegacyRebase();
     testPdoMapErrors();
+    testMotorConfigResolution();
 
     if (failures != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);

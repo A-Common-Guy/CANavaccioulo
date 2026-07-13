@@ -95,11 +95,19 @@ void writeObjectName(std::ostream& stream, const char* name, uint16_t index, uin
 }  // namespace
 
 MotorDriver::MotorDriver(::lely::canopen::AsyncMaster& master, uint8_t node_id,
-                         BootActionConfig boot_actions, config::PdoMap pdo_map)
+                         config::MotorConfig config, config::PdoMap pdo_map)
     : ::lely::canopen::FiberDriver(master, node_id),
       drive_(*this),
-      boot_actions_(std::move(boot_actions)),
-      pdo_map_(std::move(pdo_map)) {
+      config_(std::move(config)),
+      pdo_map_(std::move(pdo_map)),
+      selected_mode_(config_.operation_mode) {
+    // Seed the runtime operating intent from the boot configuration; runtime
+    // requests (enable / stop / mode change) update the intent, never the
+    // configuration itself.
+    want_enabled_ = wantsMotionAction();
+    want_hold_position_ = config_.hold_position_on_boot ||
+                          config_.csp_target_position.has_value() ||
+                          config_.csp_relative_move.has_value();
     buildCyclicObjects();
 }
 
@@ -243,10 +251,10 @@ void MotorDriver::publishFeedback() {
 
 bool MotorDriver::feedbackStale(std::chrono::steady_clock::time_point now) const {
     // Disabled, or no feedback received yet (nothing to be stale about).
-    if (boot_actions_.feedback_timeout.count() <= 0 || !rpdo_seen_) {
+    if (config_.feedback_timeout.count() <= 0 || !rpdo_seen_) {
         return false;
     }
-    return (now - last_feedback_time_) > boot_actions_.feedback_timeout;
+    return (now - last_feedback_time_) > config_.feedback_timeout;
 }
 
 void MotorDriver::logFaultTransition() {
@@ -313,7 +321,7 @@ void MotorDriver::updateCyclicStats(std::chrono::steady_clock::time_point now) {
         }
         interval_sum_us_ += interval_us;
         stats_.mean_us = interval_sum_us_ / static_cast<double>(stats_.cycles);
-        const double nominal_us = static_cast<double>(boot_actions_.sync_period_us);
+        const double nominal_us = static_cast<double>(config_.sync_period_us);
         if (nominal_us > 0.0) {
             stats_.max_jitter_us =
                 std::max(stats_.max_jitter_us, std::abs(interval_us - nominal_us));
@@ -454,7 +462,7 @@ void MotorDriver::OnBoot(::lely::canopen::NmtState state, char error,
     stablecops::log::out() << "node " << static_cast<int>(id()) << " booted, NMT state "
                            << static_cast<int>(state) << '\n';
 
-    if (boot_actions_.inspect) {
+    if (config_.inspect_on_boot) {
         inspectNode();
     }
     runBootActions();
@@ -496,11 +504,11 @@ std::error_code MotorDriver::selectOperationMode() noexcept {
     // to mode selection). One fixed PDO layout serves CSP/CSV/CST, so this is
     // the only object that changes between cyclic modes. Left untouched when no
     // mode is requested, preserving the drive's persisted mode.
-    if (!boot_actions_.mode) {
+    if (!selected_mode_) {
         return {};
     }
 
-    const auto mode = *boot_actions_.mode;
+    const auto mode = *selected_mode_;
     std::error_code ec;
     Wait(AsyncWrite(ds402::od::modes_of_operation, ds402::od::default_subindex,
                     static_cast<int8_t>(mode)),
@@ -536,27 +544,27 @@ std::error_code MotorDriver::configureProfileParameters() noexcept {
         return true;
     };
 
-    if (!write(boot_actions_.profile_velocity, ds402::od::profile_velocity, "profile velocity")) {
+    if (!write(config_.profile_velocity, ds402::od::profile_velocity, "profile velocity")) {
         return ec;
     }
-    if (!write(boot_actions_.profile_acceleration, ds402::od::profile_acceleration,
+    if (!write(config_.profile_acceleration, ds402::od::profile_acceleration,
                "profile acceleration")) {
         return ec;
     }
-    if (!write(boot_actions_.profile_deceleration, ds402::od::profile_deceleration,
+    if (!write(config_.profile_deceleration, ds402::od::profile_deceleration,
                "profile deceleration")) {
         return ec;
     }
-    if (!write(boot_actions_.torque_slope, ds402::od::torque_slope, "torque slope")) {
+    if (!write(config_.torque_slope, ds402::od::torque_slope, "torque slope")) {
         return ec;
     }
 
     // Vendor "Disable Mode" (0x2103) is a single-byte object, so it must be
     // written as u8 (a u32 download aborts on length mismatch). Selects the
     // power-stage behaviour on disable (coast vs short-circuit braking).
-    if (boot_actions_.disable_mode) {
+    if (config_.disable_mode) {
         Wait(AsyncWrite(ds402::od::disable_mode, ds402::od::default_subindex,
-                        static_cast<uint8_t>(*boot_actions_.disable_mode)),
+                        static_cast<uint8_t>(*config_.disable_mode)),
              ec);
         if (ec) {
             stablecops::log::err()
@@ -564,13 +572,13 @@ std::error_code MotorDriver::configureProfileParameters() noexcept {
             return ec;
         }
         stablecops::log::out() << "  disable mode (0x2103) set to "
-                               << static_cast<int>(*boot_actions_.disable_mode) << '\n';
+                               << static_cast<int>(*config_.disable_mode) << '\n';
     }
 
     // Ad-hoc raw object writes (experimentation / drive configuration). Each is
     // downloaded with the requested CANopen width so single-byte objects are not
     // rejected by a wrong-length download.
-    for (const auto& object : boot_actions_.object_writes) {
+    for (const auto& object : config_.object_writes) {
         switch (object.width) {
             case ds402::ObjectWidth::U8:
                 Wait(AsyncWrite(object.index, object.subindex, static_cast<uint8_t>(object.value)),
@@ -614,7 +622,7 @@ std::error_code MotorDriver::configureProfileParameters() noexcept {
     // Persist the objects just written so a value that the drive only honours out
     // of NVM (or that must survive a power cycle) takes effect. Saves all
     // application parameters (0x1010:03).
-    if (boot_actions_.save_params) {
+    if (config_.save_params) {
         try {
             drive_.storeApplicationParameters();
         } catch (const std::exception& exception) {
@@ -779,18 +787,17 @@ void MotorDriver::OnSync(uint8_t /*counter*/, const time_point& /*time*/) noexce
                                homing_phase_ != ds402::HomingPhase::Failed;
     if (cyclic_active_ && stop_phase_ == StopPhase::None && stale) {
         if (homing_active) {
-            stablecops::log::err() << "feedback watchdog: no drive feedback for >"
-                                   << boot_actions_.feedback_timeout.count()
-                                   << " ms during homing; commanding zero velocity\n";
+            stablecops::log::err()
+                << "feedback watchdog: no drive feedback for >" << config_.feedback_timeout.count()
+                << " ms during homing; commanding zero velocity\n";
             failHoming("feedback watchdog expired during homing");
         } else if (homing_phase_ == ds402::HomingPhase::Failed) {
             if (hasCommand(ds402::od::target_velocity)) {
                 setCommandValue(ds402::od::target_velocity, 0);
             }
         } else {
-            stablecops::log::err()
-                << "feedback watchdog: no drive feedback for >"
-                << boot_actions_.feedback_timeout.count() << " ms; de-energising\n";
+            stablecops::log::err() << "feedback watchdog: no drive feedback for >"
+                                   << config_.feedback_timeout.count() << " ms; de-energising\n";
             requestGracefulStop();
         }
     }
@@ -959,11 +966,11 @@ void MotorDriver::inspectNode() noexcept {
 
     const auto [position_counts, position_ok] =
         read_i32(ds402::od::position_actual_value, ds402::od::default_subindex, "position");
-    if (position_ok && boot_actions_.counts_per_rev != 0) {
+    if (position_ok && config_.counts_per_rev != 0) {
         stablecops::log::out() << "    -> "
-                               << (static_cast<double>(position_counts) /
-                                   boot_actions_.counts_per_rev * 360.0)
-                               << " deg (" << boot_actions_.counts_per_rev << " counts/rev)\n";
+                               << (static_cast<double>(position_counts) / config_.counts_per_rev *
+                                   360.0)
+                               << " deg (" << config_.counts_per_rev << " counts/rev)\n";
     }
     read_i32(ds402::od::velocity_actual_value, ds402::od::default_subindex, "velocity");
     read_u16(ds402::od::torque_actual_value, ds402::od::default_subindex, "torque");
@@ -1087,9 +1094,8 @@ void MotorDriver::inspectNode() noexcept {
 }
 
 bool MotorDriver::wantsMotionAction() const {
-    return boot_actions_.enable || boot_actions_.hold_position ||
-           boot_actions_.csp_target_position.has_value() ||
-           boot_actions_.csp_relative_move.has_value();
+    return config_.enable_on_boot || config_.hold_position_on_boot ||
+           config_.csp_target_position.has_value() || config_.csp_relative_move.has_value();
 }
 
 bool MotorDriver::wantsCyclicConfig() const {
@@ -1097,8 +1103,8 @@ bool MotorDriver::wantsCyclicConfig() const {
     // drive and to merely observe its feedback cyclically. A boot-time parameter
     // write (disable mode) or NVM save also needs the pre-operational config
     // window even when no cyclic exchange is requested.
-    return wantsMotionAction() || boot_actions_.monitor || boot_actions_.disable_mode.has_value() ||
-           !boot_actions_.object_writes.empty() || boot_actions_.save_params;
+    return wantsMotionAction() || config_.monitor_on_boot || config_.disable_mode.has_value() ||
+           !config_.object_writes.empty() || config_.save_params;
 }
 
 void MotorDriver::runBootActions() noexcept {
@@ -1107,8 +1113,8 @@ void MotorDriver::runBootActions() noexcept {
     }
 
     try {
-        enableDrive(boot_actions_.hold_position || boot_actions_.csp_target_position.has_value() ||
-                    boot_actions_.csp_relative_move.has_value());
+        enableDrive(config_.hold_position_on_boot || config_.csp_target_position.has_value() ||
+                    config_.csp_relative_move.has_value());
         applyCspTarget();
     } catch (const std::exception& exception) {
         stablecops::log::err() << "boot action failed: " << exception.what() << '\n';
@@ -1216,6 +1222,10 @@ void MotorDriver::requestGracefulStop() {
         return;  // shutdown already in progress
     }
 
+    // An explicit de-energise clears the running intent, so a later fault reset
+    // recovers to disabled instead of silently re-energising.
+    want_enabled_ = false;
+
     // If nothing is energised (inspect-only, idle, or a failed boot) there is no
     // DS402 ramp-down to perform; hand control straight back to the caller.
     if (!cyclic_active_) {
@@ -1236,7 +1246,7 @@ void MotorDriver::requestGracefulStop() {
     const auto now = std::chrono::steady_clock::now();
     setControlword(ds402::controlword::disable_voltage);
     stop_phase_ = StopPhase::DisableVoltage;
-    stop_phase_deadline_ = now + boot_actions_.state_transition_timeout;
+    stop_phase_deadline_ = now + config_.state_transition_timeout;
     stop_log_due_ = now;
 }
 
@@ -1352,8 +1362,7 @@ void MotorDriver::enableDrive(bool prime_csp_target) {
 
     // Let a few SYNC cycles flow so the drive has the image before we command it.
     {
-        const auto deadline =
-            std::chrono::steady_clock::now() + boot_actions_.state_transition_timeout;
+        const auto deadline = std::chrono::steady_clock::now() + config_.state_transition_timeout;
         const auto first_cycle = sync_count_;
         while (sync_count_ < first_cycle + 4) {
             if (std::chrono::steady_clock::now() >= deadline) {
@@ -1385,15 +1394,13 @@ void MotorDriver::enableDrive(bool prime_csp_target) {
     USleep(4000);
 
     setControlword(ds402::controlword::shutdown);
-    feedback =
-        waitForDriveState(ds402::State::ReadyToSwitchOn, boot_actions_.state_transition_timeout);
+    feedback = waitForDriveState(ds402::State::ReadyToSwitchOn, config_.state_transition_timeout);
 
     setControlword(ds402::controlword::switch_on);
-    feedback = waitForDriveState(ds402::State::SwitchedOn, boot_actions_.state_transition_timeout);
+    feedback = waitForDriveState(ds402::State::SwitchedOn, config_.state_transition_timeout);
 
     setControlword(ds402::controlword::enable_operation);
-    feedback =
-        waitForDriveState(ds402::State::OperationEnabled, boot_actions_.state_transition_timeout);
+    feedback = waitForDriveState(ds402::State::OperationEnabled, config_.state_transition_timeout);
 
     // Freeze the held target at the position captured the instant we enabled.
     csp_track_actual_ = false;
@@ -1442,16 +1449,13 @@ void MotorDriver::requestFaultReset() {
                                feedback_.mode == ds402::OperationMode::ProfilePosition;
     csp_track_actual_ = position_mode;
 
-    // Re-enable to the configured operating state: if the drive was meant to be
-    // driven, walk all the way back to operation enabled; otherwise just clear
-    // the fault and leave it safely disabled.
-    recover_to_enabled_ = boot_actions_.enable || boot_actions_.hold_position ||
-                          boot_actions_.csp_target_position.has_value() ||
-                          boot_actions_.csp_relative_move.has_value();
+    // Recover to the current operating intent: if the application wants the
+    // drive running, walk all the way back to operation enabled; otherwise just
+    // clear the fault and leave it safely disabled.
+    recover_to_enabled_ = want_enabled_;
     cyclic_active_ = true;
     enable_phase_ = EnablePhase::FaultReset;
-    enable_phase_deadline_ =
-        std::chrono::steady_clock::now() + boot_actions_.state_transition_timeout;
+    enable_phase_deadline_ = std::chrono::steady_clock::now() + config_.state_transition_timeout;
     stablecops::log::out() << "fault reset requested (recover to "
                            << (recover_to_enabled_ ? "operation enabled" : "disabled") << ")\n";
 }
@@ -1461,8 +1465,8 @@ void MotorDriver::requestEnableOperation(bool hold_position) {
         throw std::runtime_error("cannot enable while graceful stop is in progress");
     }
     stop_phase_ = StopPhase::None;
-    boot_actions_.enable = true;
-    boot_actions_.hold_position = hold_position;
+    want_enabled_ = true;
+    want_hold_position_ = hold_position;
     enableDrive(hold_position);
 }
 
@@ -1491,7 +1495,7 @@ void MotorDriver::requestOperationMode(ds402::OperationMode mode, bool confirm) 
     if (ec) {
         throw std::system_error(ec, "SDO write to modes of operation (0x6060:00) failed");
     }
-    boot_actions_.mode = mode;
+    selected_mode_ = mode;
     stablecops::log::out() << "operation mode requested: " << ds402::toString(mode)
                            << " (0x6060=" << static_cast<int>(static_cast<int8_t>(mode)) << ")\n";
 
@@ -1501,8 +1505,7 @@ void MotorDriver::requestOperationMode(ds402::OperationMode mode, bool confirm) 
     // caller commanding the wrong mode. Only done off the cyclic path (the
     // homing restore drives this from OnSync and must stay non-blocking).
     if (confirm) {
-        const auto deadline =
-            std::chrono::steady_clock::now() + boot_actions_.state_transition_timeout;
+        const auto deadline = std::chrono::steady_clock::now() + config_.state_transition_timeout;
         while (drive_.readMode() != mode) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 throw std::runtime_error(
@@ -1564,8 +1567,7 @@ void MotorDriver::requestHoming(const ds402::HomingConfig& config) {
         if (feedback_.state != ds402::State::SwitchOnDisabled &&
             feedback_.state != ds402::State::NotReadyToSwitchOn) {
             setControlword(ds402::controlword::disable_voltage);
-            waitForDriveState(ds402::State::SwitchOnDisabled,
-                              boot_actions_.state_transition_timeout);
+            waitForDriveState(ds402::State::SwitchOnDisabled, config_.state_transition_timeout);
         }
         requestOperationMode(ds402::OperationMode::CyclicSynchronousVelocity);
     }
@@ -1854,7 +1856,7 @@ void MotorDriver::advanceHoming() {
                 cyclic_active_ = true;
                 setControlword(ds402::controlword::shutdown);
                 enable_phase_ = EnablePhase::Shutdown;
-                enable_phase_deadline_ = now + boot_actions_.state_transition_timeout;
+                enable_phase_deadline_ = now + config_.state_transition_timeout;
                 homing_phase_ = ds402::HomingPhase::RestoreEnable;
             } else {
                 cyclic_active_ = false;
@@ -1905,7 +1907,7 @@ void MotorDriver::advanceEnableLadder() {
     const auto advance = [&](EnablePhase next, uint16_t controlword) {
         setControlword(controlword);
         enable_phase_ = next;
-        enable_phase_deadline_ = now + boot_actions_.state_transition_timeout;
+        enable_phase_deadline_ = now + config_.state_transition_timeout;
     };
 
     switch (enable_phase_) {
@@ -1997,7 +1999,7 @@ void MotorDriver::advanceProfileSetpoint() {
 }
 
 void MotorDriver::applyCspTarget() {
-    if (!boot_actions_.csp_target_position && !boot_actions_.csp_relative_move) {
+    if (!config_.csp_target_position && !config_.csp_relative_move) {
         return;
     }
 
@@ -2010,11 +2012,11 @@ void MotorDriver::applyCspTarget() {
     }
 
     int64_t target = feedback.position;
-    if (boot_actions_.csp_target_position) {
-        target = *boot_actions_.csp_target_position;
+    if (config_.csp_target_position) {
+        target = *config_.csp_target_position;
     }
-    if (boot_actions_.csp_relative_move) {
-        target += *boot_actions_.csp_relative_move;
+    if (config_.csp_relative_move) {
+        target += *config_.csp_relative_move;
     }
 
     if (target < std::numeric_limits<int32_t>::min() ||
@@ -2023,7 +2025,7 @@ void MotorDriver::applyCspTarget() {
     }
 
     const auto delta = target - feedback.position;
-    if (std::llabs(delta) > boot_actions_.max_position_step) {
+    if (std::llabs(delta) > config_.max_position_step) {
         throw std::runtime_error("requested CSP step exceeds --max-position-step");
     }
 

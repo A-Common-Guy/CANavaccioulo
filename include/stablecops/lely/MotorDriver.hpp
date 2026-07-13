@@ -12,46 +12,13 @@
 
 #include <lely/coapp/fiber_driver.hpp>
 
+#include "stablecops/config/MotorConfig.hpp"
 #include "stablecops/config/PdoMap.hpp"
 #include "stablecops/ds402/DriveController.hpp"
 #include "stablecops/ds402/ObjectAccess.hpp"
 #include "stablecops/lely/CyclicStats.hpp"
 
 namespace stablecops::lely {
-
-struct BootActionConfig {
-    bool inspect{false};
-    bool enable{false};
-    bool hold_position{false};
-    bool monitor{false};
-    // When set, selected over SDO (0x6060) while pre-operational at boot.
-    std::optional<ds402::OperationMode> mode;
-    // Profile-mode parameters, written over SDO at boot when set.
-    std::optional<uint32_t> profile_velocity;
-    std::optional<uint32_t> profile_acceleration;
-    std::optional<uint32_t> profile_deceleration;
-    std::optional<uint32_t> torque_slope;
-    // Vendor "Disable Mode" (0x2103), written over SDO at boot when set. Selects
-    // the power-stage behaviour on disable (coast/high-impedance vs short-circuit
-    // dynamic braking); concrete values are drive-specific.
-    std::optional<uint8_t> disable_mode;
-    // Ad-hoc raw object writes applied over SDO at boot (pre-operational), in
-    // order, for drive configuration/experimentation.
-    std::vector<ds402::ObjectWrite> object_writes;
-    // Persist the configuration objects written at boot to NVM (0x1010:03).
-    bool save_params{false};
-    std::optional<int32_t> csp_target_position;
-    std::optional<int32_t> csp_relative_move;
-    int32_t max_position_step{10000};
-    // Output-shaft counts per revolution of 0x6064, for the degrees readout.
-    uint32_t counts_per_rev{524288};
-    std::chrono::milliseconds state_transition_timeout{2000};
-    // Feedback-staleness watchdog window; 0 disables it.
-    std::chrono::milliseconds feedback_timeout{100};
-    // Nominal cyclic period in microseconds, used as the reference for jitter
-    // telemetry (should match the master's SYNC period from the DCF).
-    uint32_t sync_period_us{1000};
-};
 
 // One object that rides in a cyclic PDO, keyed by (index, subindex). For command
 // objects `value` holds the latest commanded value the master streams; for
@@ -66,8 +33,12 @@ struct CyclicObject {
 
 class MotorDriver final : public ::lely::canopen::FiberDriver, public ds402::ObjectAccess {
 public:
-    MotorDriver(::lely::canopen::AsyncMaster& master, uint8_t node_id,
-                BootActionConfig boot_actions, config::PdoMap pdo_map);
+    // `config` carries the per-drive settings (boot behaviour, mode, profile
+    // parameters, timeouts, scaling); bus-level fields are ignored here. Pass a
+    // profile-resolved config (config::resolveMotorConfig) so the [profile]
+    // fields carry the actuator's values.
+    MotorDriver(::lely::canopen::AsyncMaster& master, uint8_t node_id, config::MotorConfig config,
+                config::PdoMap pdo_map);
 
     ds402::DriveController& drive();
     const ds402::DriveController& drive() const;
@@ -222,8 +193,16 @@ private:
     void publishFeedback();
 
     ds402::DriveController drive_;
-    BootActionConfig boot_actions_;
+    config::MotorConfig config_;
     config::PdoMap pdo_map_;
+
+    // Runtime operating intent, seeded from config_ at construction and updated
+    // by runtime requests (enable / mode change / stop). Kept separate so
+    // fault recovery restores what the application currently wants, and the
+    // configuration itself is never mutated.
+    bool want_enabled_{false};
+    bool want_hold_position_{false};
+    std::optional<ds402::OperationMode> selected_mode_;
 
     enum class StopPhase : uint8_t { None, DisableVoltage, Done };
 

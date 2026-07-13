@@ -60,3 +60,37 @@ eds_overrides:
   # Disable RxPDO3
   "1402sub1": { DefaultValue: "$NODEID+0x80000400" }
   "1602sub0": { DefaultValue: "0" }
+
+# Runtime settings for this actuator, recorded verbatim in the generated
+# summary.json and applied by the C++ runtime (config::resolveMotorConfig) to
+# every MotorConfig field left at its built-in default. This file is the single
+# source of truth for actuator scaling, watchdog windows and homing defaults;
+# tune them here and regenerate.
+runtime:
+  # Output-shaft encoder counts per revolution of 0x6064 (19-bit encoder).
+  counts_per_rev: 524288
+  # Feedback-staleness watchdog window (0 disables).
+  feedback_timeout_ms: 100
+  # Timeout for each DS402 state transition.
+  state_transition_timeout_ms: 2000
+  # Guard for boot-time CSP targets, in counts.
+  max_position_step: 10000
+  # Hardstop-midpoint homing defaults (drive velocity/torque units); the
+  # application supplies the leg-specific home_offset.
+  homing:
+    search_velocity: 25000
+    approach_velocity: 24000
+    center_velocity: 24000
+    center_final_velocity: 4000
+    center_slowdown_distance: 1000
+    backoff_distance: 2000
+    center_tolerance: 50
+    center_settle_tolerance: 200
+    min_travel: 1000
+    max_travel: 2000000
+    threshold_torque: 90
+    stopped_velocity: 200
+    contact_dwell_ms: 20
+    settle_time_ms: 200
+    timeout_ms: 30000
+    save_zero_to_nvm: true

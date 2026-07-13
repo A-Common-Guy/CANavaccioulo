@@ -13,50 +13,30 @@
 #include <lely/io2/sys/sigset.hpp>
 #include <lely/io2/sys/timer.hpp>
 
+#include <time.h>
 #include <chrono>
 #include <csignal>
 #include <optional>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
-#include <time.h>
 
 namespace stablecops::app {
 
 namespace {
 
-stablecops::lely::BootActionConfig makeBootActions(const MotorConfig& config) {
-    stablecops::lely::BootActionConfig actions;
-    actions.inspect = config.inspect_on_boot;
-    actions.enable = config.enable_on_boot;
-    actions.hold_position = config.hold_position_on_boot;
-    actions.monitor = config.monitor_on_boot;
-    actions.mode = config.operation_mode;
-    actions.profile_velocity = config.profile_velocity;
-    actions.profile_acceleration = config.profile_acceleration;
-    actions.profile_deceleration = config.profile_deceleration;
-    actions.torque_slope = config.torque_slope;
-    actions.disable_mode = config.disable_mode;
-    actions.object_writes = config.object_writes;
-    actions.save_params = config.save_params;
-    actions.csp_target_position = config.csp_target_position;
-    actions.csp_relative_move = config.csp_relative_move;
-    actions.max_position_step = config.max_position_step;
-    actions.counts_per_rev = config.counts_per_rev;
-    actions.state_transition_timeout = config.state_transition_timeout;
-    actions.feedback_timeout = config.feedback_timeout;
-    actions.sync_period_us = config.sync_period_us;
-    return actions;
-}
-
 std::vector<MotorConfig> wrapSingle(const MotorConfig& config) {
     return std::vector<MotorConfig>{config};
 }
 
-std::vector<MotorConfig> requireNonEmpty(std::vector<MotorConfig> configs) {
+// Validate and profile-resolve the node configs once, before anything reads
+// them (resolution is idempotent, so pre-resolved configs pass through).
+std::vector<MotorConfig> prepareConfigs(std::vector<MotorConfig> configs) {
     if (configs.empty()) {
-        throw std::invalid_argument(
-            "CanopenApplication requires at least one node config");
+        throw std::invalid_argument("CanopenApplication requires at least one node config");
+    }
+    for (auto& config : configs) {
+        config = stablecops::config::resolveMotorConfig(std::move(config));
     }
     return configs;
 }
@@ -66,7 +46,7 @@ std::vector<MotorConfig> requireNonEmpty(std::vector<MotorConfig> configs) {
 class CanopenApplication::Impl {
 public:
     explicit Impl(std::vector<MotorConfig> node_configs, bool install_signal_handler)
-        : configs_(requireNonEmpty(std::move(node_configs))),
+        : configs_(prepareConfigs(std::move(node_configs))),
           io_guard_(),
           context_(),
           poll_(context_),
@@ -86,8 +66,8 @@ public:
             // drive needs node-ID-specific COB-IDs on the wire.
             const auto pdo_map =
                 stablecops::config::loadPdoMapFromSummary(config.summary_path, config.node_id);
-            auto motor = std::make_unique<stablecops::lely::MotorDriver>(
-                master_, config.node_id, makeBootActions(config), pdo_map);
+            auto motor = std::make_unique<stablecops::lely::MotorDriver>(master_, config.node_id,
+                                                                         config, pdo_map);
             // On a coordinated shutdown, each drive reports when it is
             // de-energised; once all have, the bus resets and the loop stops.
             motor->setStoppedCallback([this] { onMotorStopped(); });
@@ -111,8 +91,8 @@ public:
     void armSignalWait() {
         sigset_->submit_wait(executor_, [this](int signo) {
             if (!shutdown_initiated_) {
-                stablecops::log::out() << "\nreceived signal " << signo
-                          << "; disabling drives and shutting down...\n";
+                stablecops::log::out()
+                    << "\nreceived signal " << signo << "; disabling drives and shutting down...\n";
                 requestShutdown();
                 // Re-arm so a second signal forces an immediate stop if the
                 // controlled ramp-down stalls (e.g. lost feedback).
@@ -135,8 +115,7 @@ public:
         }
         // Fallback: even if some drive never confirms de-energising (e.g. it
         // already went silent), tear the bus down after a bounded grace period.
-        shutdown_deadline_ =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds{1500};
+        shutdown_deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds{1500};
         scheduleShutdownCheck();
     }
 
@@ -155,15 +134,13 @@ public:
 
     void scheduleShutdownCheck() {
         shutdown_timer_.settime(std::chrono::milliseconds{50});
-        shutdown_timer_.submit_wait(
-            executor_, [this](int /*overrun*/, std::error_code /*ec*/) {
-                if (!shutdown_complete_ &&
-                    std::chrono::steady_clock::now() >= shutdown_deadline_) {
-                    finishShutdown(/*reset_nodes=*/true);
-                } else if (!shutdown_complete_) {
-                    scheduleShutdownCheck();
-                }
-            });
+        shutdown_timer_.submit_wait(executor_, [this](int /*overrun*/, std::error_code /*ec*/) {
+            if (!shutdown_complete_ && std::chrono::steady_clock::now() >= shutdown_deadline_) {
+                finishShutdown(/*reset_nodes=*/true);
+            } else if (!shutdown_complete_) {
+                scheduleShutdownCheck();
+            }
+        });
     }
 
     void finishShutdown(bool reset_nodes) {
@@ -187,11 +164,10 @@ public:
 
         // Give reset frames time to leave the CAN channel before teardown.
         shutdown_timer_.settime(std::chrono::milliseconds{50});
-        shutdown_timer_.submit_wait(
-            executor_, [this](int /*overrun*/, std::error_code /*ec*/) {
-                context_.shutdown();
-                loop_.stop();
-            });
+        shutdown_timer_.submit_wait(executor_, [this](int /*overrun*/, std::error_code /*ec*/) {
+            context_.shutdown();
+            loop_.stop();
+        });
     }
 
     stablecops::lely::MotorDriver* motorFor(uint8_t node_id) {

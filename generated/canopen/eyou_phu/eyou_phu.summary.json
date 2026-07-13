@@ -8,6 +8,7 @@
     1
   ],
   "master_node_id": 127,
+  "sync_period_us": 1000,
   "identity_policy": "ignore",
   "pdo_policy": "csp-minimal",
   "mode_policy": "vendor-default",

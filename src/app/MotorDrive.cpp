@@ -9,9 +9,12 @@
 
 namespace stablecops::app {
 
-MotorDrive::MotorDrive(MotorConfig config) : config_(std::move(config)), node_id_(config_.node_id) {
+MotorDrive::MotorDrive(MotorConfig config)
+    : config_(stablecops::config::resolveMotorConfig(std::move(config))),
+      node_id_(config_.node_id) {
     // Join (or create) the hidden shared bus for this interface and register
-    // this node before anyone starts the chain.
+    // this node before anyone starts the chain. The bus sees the resolved
+    // config, so siblings resolved from the same summary always match.
     bus_ = Bus::getOrCreate(config_);
     bus_->registerNode(config_);
 }

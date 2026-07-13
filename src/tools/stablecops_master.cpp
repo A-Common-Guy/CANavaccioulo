@@ -12,6 +12,7 @@
 #include "stablecops/app/CanopenApplication.hpp"
 #include "stablecops/app/MotorConfig.hpp"
 #include "stablecops/app/RealtimeScheduling.hpp"
+#include "stablecops/config/MotorConfig.hpp"
 #include "stablecops/ds402/ObjectAccess.hpp"
 #include "stablecops/ds402/State.hpp"
 #include "ToolCli.hpp"
@@ -48,13 +49,20 @@ std::optional<stablecops::ds402::ObjectWrite> parseObjectWrite(const std::string
     } catch (...) {
         return std::nullopt;
     }
-    if (type_str == "u8") write.width = ObjectWidth::U8;
-    else if (type_str == "u16") write.width = ObjectWidth::U16;
-    else if (type_str == "u32") write.width = ObjectWidth::U32;
-    else if (type_str == "i8") write.width = ObjectWidth::I8;
-    else if (type_str == "i16") write.width = ObjectWidth::I16;
-    else if (type_str == "i32") write.width = ObjectWidth::I32;
-    else return std::nullopt;
+    if (type_str == "u8")
+        write.width = ObjectWidth::U8;
+    else if (type_str == "u16")
+        write.width = ObjectWidth::U16;
+    else if (type_str == "u32")
+        write.width = ObjectWidth::U32;
+    else if (type_str == "i8")
+        write.width = ObjectWidth::I8;
+    else if (type_str == "i16")
+        write.width = ObjectWidth::I16;
+    else if (type_str == "i32")
+        write.width = ObjectWidth::I32;
+    else
+        return std::nullopt;
     return write;
 }
 
@@ -186,6 +194,11 @@ int runMaster(int argc, char** argv) {
         node_ids.push_back(config.node_id);
     }
 
+    // Resolve the profile-sourced defaults (sync period, counts/rev, timeouts,
+    // homing) from the summary now, so the printout below shows the effective
+    // values the runtime will use.
+    config = stablecops::config::resolveMotorConfig(config);
+
     // One config per node; all share the bus-level fields from `config`.
     std::vector<stablecops::app::MotorConfig> node_configs;
     for (uint8_t node_id : node_ids) {
@@ -199,17 +212,15 @@ int runMaster(int argc, char** argv) {
               << "Master Node ID: " << static_cast<int>(config.master_node_id) << '\n'
               << "Node IDs: ";
     for (std::size_t i = 0; i < node_ids.size(); ++i) {
-        std::cout << static_cast<int>(node_ids[i])
-                  << (i + 1 < node_ids.size() ? "," : "");
+        std::cout << static_cast<int>(node_ids[i]) << (i + 1 < node_ids.size() ? "," : "");
     }
     std::cout << '\n'
               << "Inspect on boot: " << (config.inspect_on_boot ? "yes" : "no") << '\n'
               << "Monitor on boot: " << (config.monitor_on_boot ? "yes" : "no") << '\n'
               << "Enable on boot: " << (config.enable_on_boot ? "yes" : "no") << '\n'
               << "Operation mode: "
-              << (config.operation_mode
-                      ? stablecops::ds402::toString(*config.operation_mode)
-                      : std::string("persisted (unchanged)"))
+              << (config.operation_mode ? stablecops::ds402::toString(*config.operation_mode)
+                                        : std::string("persisted (unchanged)"))
               << '\n'
               << "Hold position: " << (config.hold_position_on_boot ? "yes" : "no") << '\n'
               << "Disable mode (0x2103): "
@@ -225,9 +236,8 @@ int runMaster(int argc, char** argv) {
               << "Real-time: "
               << (config.rt.enabled
                       ? ("SCHED_FIFO prio " + std::to_string(config.rt.priority) +
-                         (config.rt.cpu >= 0
-                              ? ", cpu " + std::to_string(config.rt.cpu)
-                              : std::string(", unpinned")) +
+                         (config.rt.cpu >= 0 ? ", cpu " + std::to_string(config.rt.cpu)
+                                             : std::string(", unpinned")) +
                          (config.rt.lock_memory ? ", mlock" : ", no mlock"))
                       : std::string("off"))
               << '\n'
@@ -252,17 +262,16 @@ int runMaster(int argc, char** argv) {
             while (!stats_done.load()) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 const auto stats = app.cyclicStats();
-                std::cout << "cycle: n=" << stats.cycles << " last="
-                          << stats.last_us << "us mean=" << stats.mean_us
-                          << "us min=" << stats.min_us << "us max=" << stats.max_us
-                          << "us jitter(max)=" << stats.max_jitter_us << "us\n";
+                std::cout << "cycle: n=" << stats.cycles << " last=" << stats.last_us
+                          << "us mean=" << stats.mean_us << "us min=" << stats.min_us
+                          << "us max=" << stats.max_us << "us jitter(max)=" << stats.max_jitter_us
+                          << "us\n";
                 for (uint8_t node_id : node_ids) {
                     const auto fb = app.feedback(node_id);
                     std::cout << "  node " << static_cast<int>(node_id)
                               << " state=" << stablecops::ds402::toString(fb.state)
                               << " pos=" << fb.position << " vel=" << fb.velocity
-                              << (app.feedbackLive(node_id) ? " [live]" : " [stale]")
-                              << '\n';
+                              << (app.feedbackLive(node_id) ? " [live]" : " [stale]") << '\n';
                 }
             }
         });
